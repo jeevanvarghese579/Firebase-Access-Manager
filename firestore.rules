@@ -1,0 +1,50 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isGoogleUser() {
+      return request.auth != null
+        && request.auth.token.email != null
+        && request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+
+    function isApprovedAscensionUser() {
+      return isGoogleUser()
+        && exists(/databases/$(database)/documents/invitedEmails/$(request.auth.token.email.lower()))
+        && get(/databases/$(database)/documents/invitedEmails/$(request.auth.token.email.lower())).data.active == true;
+    }
+
+    // Existing shared-project behavior retained unchanged.
+    match /users/{uid}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    match /invitedEmails/{email} {
+      allow get: if isGoogleUser() && email == request.auth.token.email.lower();
+      allow list, create, update, delete: if false;
+    }
+
+    match /ascensionManagerUsers/{userId} {
+      allow read, write: if isApprovedAscensionUser() && request.auth.uid == userId;
+
+      match /{document=**} {
+        allow read, write: if isApprovedAscensionUser() && request.auth.uid == userId;
+      }
+    }
+
+    // Access Manager data is server-only. Every browser request is denied;
+    // callable functions use Admin SDK and perform their own authorization.
+    match /admins/{document=**} {
+      allow read, write: if false;
+    }
+    match /adminInvites/{document=**} {
+      allow read, write: if false;
+    }
+    match /accessUsers/{document=**} {
+      allow read, write: if false;
+    }
+    match /appRegistry/{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
