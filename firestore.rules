@@ -4,7 +4,8 @@ service cloud.firestore {
   match /databases/{database}/documents {
     function isAuthenticatedUser() {
       return request.auth != null
-        && request.auth.token.email != null;
+        && request.auth.token.email != null
+        && request.auth.token.email_verified == true;
     }
 
     function ascensionFirebaseAppId() {
@@ -13,11 +14,20 @@ service cloud.firestore {
 
     function hasAscensionManagerAccess() {
       return isAuthenticatedUser()
-        && exists(/databases/$(database)/documents/accessUsers/$(request.auth.uid))
-        && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.active == true
-        && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.apps[ascensionFirebaseAppId()] == true
         && exists(/databases/$(database)/documents/appRegistry/$(ascensionFirebaseAppId()))
-        && get(/databases/$(database)/documents/appRegistry/$(ascensionFirebaseAppId())).data.active == true;
+        && get(/databases/$(database)/documents/appRegistry/$(ascensionFirebaseAppId())).data.active == true
+        && (
+          (
+            exists(/databases/$(database)/documents/accessUsers/$(request.auth.uid))
+            && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.active == true
+            && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.apps[ascensionFirebaseAppId()] == true
+          )
+          || (
+            !exists(/databases/$(database)/documents/accessUsers/$(request.auth.uid))
+            && exists(/databases/$(database)/documents/invitedEmails/$(request.auth.token.email.lower()))
+            && get(/databases/$(database)/documents/invitedEmails/$(request.auth.token.email.lower())).data.active == true
+          )
+        );
     }
 
     // Existing shared-project behavior retained unchanged.
