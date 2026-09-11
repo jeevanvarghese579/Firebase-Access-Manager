@@ -17,6 +17,8 @@ Admin-only control panel for assigning Google accounts to Firebase web apps in t
 - `adminInvites/{normalizedEmail}` — pre-approved admins who have not signed in yet.
 - `accessUsers/{normalizedEmail}` — user status plus an `apps` map keyed by Firebase App ID.
 - `appRegistry/{firebaseAppId}` — safe discovered metadata and current availability.
+- `accessRequests/{requestId}` — immutable request identity/app details, status, timestamps, reviewer, and optional notes.
+- `accessRequestKeys/{sha256(uid:appId)}` — server-only uniqueness lock for one pending request per account/app pair; removed after review.
 
 ## Backend functions
 
@@ -25,6 +27,8 @@ Admin-only control panel for assigning Google accounts to Firebase web apps in t
 - `saveAccessUser` / `deleteAccessUser` — admin-only user permission changes.
 - `saveAdmin` / `setAdminStatus` — admin-only administrator management.
 - `checkMyAccess` — lets a signed-in Google user check their own assigned access.
+- `requestAppAccess` — creates an authenticated request using the verified token identity and a registered Firebase App ID.
+- `reviewAccessRequest` — admin-only approval/rejection transaction; approval enables only the requested app.
 
 ## Bootstrap the first administrator
 
@@ -71,6 +75,8 @@ if (!(data as { allowed: boolean }).allowed) {
 
 This client check is for navigation and messaging only. Browser-supplied `appId` is not a security boundary. Every protected backend function must enforce the intended app's fixed/server-configured Firebase App ID and verify `accessUsers/{normalizedEmail}.active == true` plus `apps[trustedAppId] == true` before accessing protected data. Firestore rules cannot reliably infer which Firebase web app originated a request.
 
+For the complete explicit **Request Access** button flow, reuse [`docs/client-access-request.ts`](docs/client-access-request.ts). It derives the email and UID exclusively from Firebase Authentication; client apps submit only their configured `firebaseApp.options.appId`. A pending request returns an awaiting-review state instead of creating a duplicate.
+
 ## Test checklist
 
 - Approved admin signs in; unapproved Google account is signed out with an authorization error.
@@ -79,4 +85,8 @@ This client check is for navigation and messaging only. Browser-supplied `appId`
 - Add an existing admin and a never-signed-in admin invite; confirm both flows.
 - Confirm ordinary authenticated users cannot read or write the four Access Manager collections directly.
 - Confirm `checkMyAccess` denies disabled users, unassigned apps, and unavailable apps.
+- Sign in to a client app as an unauthorized user and explicitly request access; confirm one pending request appears in Access Manager.
+- Click the request twice and confirm no duplicate pending request is created.
+- Approve it and confirm only the requested Firebase App ID becomes enabled; all other permissions remain unchanged.
+- Reject another request and confirm its history remains visible while access stays denied.
 - Confirm existing shared-project Ascension Manager and `/users/{uid}` behavior still passes after the merged rules deploy.

@@ -46,5 +46,11 @@ service cloud.firestore {
     match /appRegistry/{document=**} {
       allow read, write: if false;
     }
+    match /accessRequests/{document=**} {
+      allow read, write: if false;
+    }
+    match /accessRequestKeys/{document=**} {
+      allow read, write: if false;
+    }
   }
 }

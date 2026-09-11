@@ -1,4 +1,4 @@
-export type View = "dashboard" | "users" | "apps" | "admins";
+export type View = "dashboard" | "users" | "apps" | "requests" | "admins";
 
 export interface WebApp {
   firebaseAppId: string;
@@ -35,4 +35,23 @@ export interface AdminData {
   users: AccessUser[];
   apps: WebApp[];
   admins: AdminRecord[];
+  requests: AccessRequest[];
+}
+
+export type RequestStatus = "pending" | "approved" | "rejected";
+
+export interface AccessRequest {
+  id: string;
+  email: string;
+  uid: string;
+  displayName: string;
+  firebaseAppId: string;
+  appDisplayName: string;
+  status: RequestStatus;
+  requestedAt?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  reviewedByEmail?: string;
+  message?: string;
+  reviewNote?: string;
 }

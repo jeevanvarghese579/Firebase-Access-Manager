@@ -2,12 +2,12 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import {
-  AppWindow, CircleAlert, CircleCheck, Cloud, LayoutDashboard,
+  AppWindow, CircleAlert, CircleCheck, Cloud, Inbox, LayoutDashboard,
   LoaderCircle, LogOut, Menu, Plus, RefreshCw, Search, Shield, Trash2, UserRound,
   UsersRound, X,
 } from "lucide-react";
 import { auth, functions, googleProvider } from "./firebase";
-import type { AccessUser, AdminData, AdminRecord, View, WebApp } from "./types";
+import type { AccessRequest, AccessUser, AdminData, AdminRecord, RequestStatus, View, WebApp } from "./types";
 
 const call = <TResult,>(name: string, data?: unknown) =>
   httpsCallable<unknown, TResult>(functions, name)(data).then((result) => result.data);
@@ -23,11 +23,17 @@ function formatDate(value?: string) {
   return Number.isNaN(date.valueOf()) ? "—" : new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(date);
 }
 
+function formatDateTime(value?: string) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "—" : new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
 function App() {
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authorized, setAuthorized] = useState(false);
-  const [data, setData] = useState<AdminData>({ users: [], apps: [], admins: [] });
+  const [data, setData] = useState<AdminData>({ users: [], apps: [], admins: [], requests: [] });
   const [view, setView] = useState<View>("dashboard");
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -36,6 +42,7 @@ function App() {
   const [mobileNav, setMobileNav] = useState(false);
   const [userEditor, setUserEditor] = useState<AccessUser | null | undefined>(undefined);
   const [adminEditor, setAdminEditor] = useState(false);
+  const [requestEditor, setRequestEditor] = useState<AccessRequest | null>(null);
 
   const loadData = useCallback(async (refreshApps = false) => {
     setLoading(true);
@@ -133,6 +140,17 @@ function App() {
     } catch (err) { setError(getMessage(err)); } finally { setLoading(false); }
   }
 
+  async function reviewRequest(request: AccessRequest, decision: "approved" | "rejected", note = "") {
+    setLoading(true);
+    setError("");
+    try {
+      await call("reviewAccessRequest", { requestId: request.id, decision, note });
+      await loadData();
+      setRequestEditor(null);
+      setToast(decision === "approved" ? `Access approved for ${request.email}.` : `Request from ${request.email} rejected.`);
+    } catch (err) { setError(getMessage(err)); } finally { setLoading(false); }
+  }
+
   if (!authReady) return <LoadingScreen />;
   if (!authUser || !authorized) return <Login onLogin={login} error={error} loading={loading} />;
 
@@ -140,6 +158,7 @@ function App() {
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "users", label: "Users", icon: UsersRound },
     { id: "apps", label: "Apps", icon: AppWindow },
+    { id: "requests", label: "Requests", icon: Inbox },
     { id: "admins", label: "Admins", icon: Shield },
   ];
 
@@ -150,7 +169,7 @@ function App() {
         <nav>
           {nav.map(({ id, label, icon: Icon }) => (
             <button key={id} className={view === id ? "active" : ""} onClick={() => { setView(id); setMobileNav(false); }}>
-              <Icon size={18} />{label}
+              <Icon size={18} />{label}{id === "requests" && data.requests.filter((request) => request.status === "pending").length > 0 && <span className="nav-badge">{data.requests.filter((request) => request.status === "pending").length}</span>}
             </button>
           ))}
         </nav>
@@ -171,11 +190,13 @@ function App() {
           {view === "dashboard" && <Dashboard data={data} setView={setView} />}
           {view === "users" && <Users data={data} edit={setUserEditor} add={() => setUserEditor(null)} />}
           {view === "apps" && <Apps apps={data.apps} users={data.users} refresh={refreshApps} syncing={syncing} />}
+          {view === "requests" && <Requests requests={data.requests} open={setRequestEditor} review={reviewRequest} busy={loading} />}
           {view === "admins" && <Admins admins={data.admins} add={() => setAdminEditor(true)} toggle={toggleAdmin} />}
         </section>
       </main>
       {userEditor !== undefined && <UserModal initial={userEditor} apps={data.apps} close={() => setUserEditor(undefined)} save={saveUser} remove={deleteUser} busy={loading} />}
       {adminEditor && <AdminModal close={() => setAdminEditor(false)} save={saveAdmin} busy={loading} />}
+      {requestEditor && <RequestModal request={requestEditor} close={() => setRequestEditor(null)} review={reviewRequest} busy={loading} />}
       {toast && <div className="toast"><CircleCheck size={18} />{toast}</div>}
     </div>
   );
@@ -200,10 +221,12 @@ function PageHead({ eyebrow, title, description, action }: { eyebrow: string; ti
 
 function Dashboard({ data, setView }: { data: AdminData; setView: (v: View) => void }) {
   const activeUsers = data.users.filter((u) => u.active).length;
+  const pendingRequests = data.requests.filter((request) => request.status === "pending");
   const cards = [
     { label: "Total users", value: data.users.length, detail: `${activeUsers} currently active`, icon: UsersRound, view: "users" as View },
     { label: "Active access", value: activeUsers, detail: `${data.users.length - activeUsers} disabled`, icon: UserRound, view: "users" as View },
     { label: "Firebase web apps", value: data.apps.filter((a) => a.active).length, detail: "Synced from Firebase", icon: AppWindow, view: "apps" as View },
+    { label: "Pending requests", value: pendingRequests.length, detail: "Needs review", icon: Inbox, view: "requests" as View },
     { label: "Administrators", value: data.admins.filter((a) => a.active).length, detail: `${data.admins.filter((a) => a.pending).length} pending`, icon: Shield, view: "admins" as View },
   ];
   return <>
@@ -213,6 +236,7 @@ function Dashboard({ data, setView }: { data: AdminData; setView: (v: View) => v
       <div className="panel"><div className="panel-title"><div><h2>Recent users</h2><p>Latest permission updates</p></div><button className="text-button" onClick={() => setView("users")}>View all</button></div>{data.users.length ? <div className="compact-list">{data.users.slice(0, 5).map((user) => <div key={user.email}><Avatar name={user.displayName || user.email} /><span><strong>{user.displayName || user.email.split("@")[0]}</strong><small>{user.email}</small></span><Status active={user.active} /></div>)}</div> : <Empty icon={UsersRound} title="No users yet" text="Add the first approved account from Users." />}</div>
       <div className="panel sync-panel"><div className="sync-orbit"><Cloud size={28} /></div><span className="eyebrow">APP REGISTRY</span><h2>Connected to Firebase</h2><p>{data.apps.length} web apps are available for permission assignments.</p><button className="secondary-button" onClick={() => setView("apps")}>Review apps</button></div>
     </div>
+    {pendingRequests.length > 0 && <div className="panel pending-panel"><div className="panel-title"><div><h2>Recent access requests</h2><p>Accounts waiting for an administrator decision</p></div><button className="text-button" onClick={() => setView("requests")}>Review all</button></div><div className="compact-list">{pendingRequests.slice(0, 4).map((request) => <div key={request.id}><Avatar name={request.displayName || request.email} /><span><strong>{request.displayName || request.email}</strong><small>{request.appDisplayName} · {formatDateTime(request.requestedAt)}</small></span><Status active label="Pending" /></div>)}</div></div>}
   </>;
 }
 
@@ -230,6 +254,18 @@ function Apps({ apps, users, refresh, syncing }: { apps: WebApp[]; users: Access
   return <>
     <PageHead eyebrow="APP REGISTRY" title="Firebase web apps" description="Discovered securely from the Firebase Management API and kept available for assignments." action={<button className="secondary-button" onClick={refresh} disabled={syncing}><RefreshCw className={syncing ? "spin" : ""} size={17} />{syncing ? "Refreshing…" : "Refresh apps"}</button>} />
     <div className="app-grid">{apps.map((app) => { const count = users.filter((u) => u.active && u.apps?.[app.firebaseAppId]).length; return <article className="app-card" key={app.firebaseAppId}><div className="app-card-top"><span className="app-icon"><AppWindow size={21} /></span><Status active={app.active} label={app.active ? "Available" : "Unavailable"} /></div><h2>{app.displayName}</h2><p>{app.firebaseAppId}</p><div className="app-meta"><span><strong>{count}</strong> users with access</span><span>WEB</span></div></article>; })}{!apps.length && <div className="wide-empty"><Empty icon={Cloud} title="No web apps found" text="Refresh the registry or verify Firebase Management API access." /></div>}</div>
+  </>;
+}
+
+function Requests({ requests, open, review, busy }: { requests: AccessRequest[]; open: (request: AccessRequest) => void; review: (request: AccessRequest, decision: "approved" | "rejected") => void; busy: boolean }) {
+  const [filter, setFilter] = useState<RequestStatus | "all">("pending");
+  const [search, setSearch] = useState("");
+  const filtered = requests.filter((request) => (filter === "all" || request.status === filter) && `${request.email} ${request.displayName} ${request.appDisplayName}`.toLowerCase().includes(search.toLowerCase()));
+  const tabs: Array<{ id: RequestStatus | "all"; label: string }> = [{ id: "pending", label: "Pending" }, { id: "approved", label: "Approved" }, { id: "rejected", label: "Rejected" }, { id: "all", label: "All" }];
+  return <>
+    <PageHead eyebrow="ACCESS REQUESTS" title="Requests" description="Review account requests without changing permissions for any other application." />
+    <div className="request-tools"><div className="filter-tabs">{tabs.map((tab) => <button key={tab.id} className={filter === tab.id ? "active" : ""} onClick={() => setFilter(tab.id)}>{tab.label}{tab.id !== "all" && <span>{requests.filter((request) => request.status === tab.id).length}</span>}</button>)}</div><label className="search"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search email or application" /></label></div>
+    <div className="table-card request-card"><div className="table-row request-table table-header"><span>User</span><span>Application</span><span>Requested</span><span>Status</span><span>Actions</span></div>{filtered.map((request) => <div className="table-row request-table request-row" key={request.id} role="button" tabIndex={0} onClick={() => open(request)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") open(request); }}><span className="user-cell"><Avatar name={request.displayName || request.email} /><span><strong>{request.displayName || "Google user"}</strong><small>{request.email}</small></span></span><span className="request-app"><strong>{request.appDisplayName}</strong><small>{request.firebaseAppId}</small></span><span className="muted">{formatDateTime(request.requestedAt)}</span><RequestStatusPill status={request.status} /><span className="row-actions">{request.status === "pending" ? <><button disabled={busy} className="approve-button" onClick={(event) => { event.stopPropagation(); review(request, "approved"); }}>Approve</button><button disabled={busy} className="reject-button" onClick={(event) => { event.stopPropagation(); review(request, "rejected"); }}>Reject</button></> : <button className="small-button" onClick={(event) => { event.stopPropagation(); open(request); }}>Details</button>}</span></div>)}{!filtered.length && <Empty icon={Inbox} title={search ? "No requests found" : `No ${filter === "all" ? "access" : filter} requests`} text={search ? "Try a different email or application name." : filter === "pending" ? "New user requests will appear here." : "Reviewed requests are retained for history."} />}</div>
   </>;
 }
 
@@ -256,8 +292,14 @@ function AdminModal({ close, save, busy }: { close: () => void; save: (input: { 
   return <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}><form className="modal compact-modal" onSubmit={(e) => { e.preventDefault(); save({ email, name }); }}><div className="modal-head"><div><span className="eyebrow">ADMINISTRATOR</span><h2>Add administrator</h2><p>If the account has not used Firebase Authentication yet, the invitation will activate at first Google sign-in.</p></div><button type="button" className="icon-button" onClick={close}><X size={20} /></button></div><div className="form-stack"><label>Email address<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="admin@example.com" /></label><label>Display name <small>Optional</small><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name" /></label></div><div className="modal-actions"><span /><span /><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" disabled={busy}>Add administrator</button></div></form></div>;
 }
 
+function RequestModal({ request, close, review, busy }: { request: AccessRequest; close: () => void; review: (request: AccessRequest, decision: "approved" | "rejected", note?: string) => void; busy: boolean }) {
+  const [note, setNote] = useState(request.reviewNote || "");
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && close()}><div className="modal compact-modal"><div className="modal-head"><div><span className="eyebrow">REQUEST DETAILS</span><h2>{request.appDisplayName}</h2><p>Requested by {request.displayName || request.email}</p></div><button type="button" className="icon-button" onClick={close}><X size={20} /></button></div><dl className="request-details"><div><dt>Email</dt><dd>{request.email}</dd></div><div><dt>Firebase UID</dt><dd>{request.uid}</dd></div><div><dt>Firebase App ID</dt><dd>{request.firebaseAppId}</dd></div><div><dt>Requested</dt><dd>{formatDateTime(request.requestedAt)}</dd></div><div><dt>Status</dt><dd><RequestStatusPill status={request.status} /></dd></div>{request.reviewedAt && <div><dt>Reviewed</dt><dd>{formatDateTime(request.reviewedAt)} by {request.reviewedByEmail || request.reviewedBy}</dd></div>}{request.message && <div><dt>User message</dt><dd>{request.message}</dd></div>}</dl>{request.status === "pending" && <label className="note-field">Review note <small>Optional</small><textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={500} placeholder="Add context for this decision" /></label>}{request.status !== "pending" && request.reviewNote && <div className="review-note"><strong>Review note</strong><p>{request.reviewNote}</p></div>}<div className="modal-actions request-modal-actions"><span /><button type="button" className="secondary-button" onClick={close}>Close</button>{request.status === "pending" && <><button type="button" className="reject-button large" disabled={busy} onClick={() => review(request, "rejected", note)}>Reject</button><button type="button" className="primary-button" disabled={busy} onClick={() => review(request, "approved", note)}>{busy && <LoaderCircle className="spin" size={17} />}Approve access</button></>}</div></div></div>;
+}
+
 function Avatar({ name }: { name: string }) { return <span className="avatar">{name.trim().slice(0, 2).toUpperCase()}</span>; }
 function Status({ active, label }: { active: boolean; label?: string }) { return <span className={`status ${active ? "positive" : "neutral"}`}><i />{label || (active ? "Active" : "Inactive")}</span>; }
+function RequestStatusPill({ status }: { status: RequestStatus }) { return <span className={`request-status ${status}`}><i />{status[0].toUpperCase() + status.slice(1)}</span>; }
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) { return <button type="button" role="switch" aria-checked={checked} className={`toggle ${checked ? "on" : ""}`} onClick={() => onChange(!checked)}><span /></button>; }
 function Empty({ icon: Icon, title, text }: { icon: typeof UsersRound; title: string; text: string }) { return <div className="empty"><span><Icon size={22} /></span><strong>{title}</strong><p>{text}</p></div>; }
 

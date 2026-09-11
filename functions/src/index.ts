@@ -4,6 +4,7 @@ import { FieldValue, Timestamp, getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall, type CallableRequest } from "firebase-functions/v2/https";
 import { setGlobalOptions } from "firebase-functions/v2/options";
 import { GoogleAuth } from "google-auth-library";
+import { createHash } from "node:crypto";
 
 if (!getApps().length) initializeApp();
 setGlobalOptions({ region: "us-central1", maxInstances: 10, timeoutSeconds: 60 });
@@ -12,6 +13,7 @@ const db = getFirestore();
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const normalizeEmail = (value: unknown) => String(value || "").trim().toLowerCase();
 const cleanText = (value: unknown, max = 120) => String(value || "").trim().slice(0, max);
+const requestKey = (uid: string, appId: string) => createHash("sha256").update(`${uid}:${appId}`).digest("hex");
 
 function projectId() {
   if (process.env.GCLOUD_PROJECT) return process.env.GCLOUD_PROJECT;
@@ -64,11 +66,12 @@ function serialize(snapshot: FirebaseFirestore.QueryDocumentSnapshot) {
 
 export const getAdminData = onCall(async (request) => {
   await requireAdmin(request);
-  const [users, apps, admins, invites] = await Promise.all([
+  const [users, apps, admins, invites, requests] = await Promise.all([
     db.collection("accessUsers").orderBy("updatedAt", "desc").get(),
     db.collection("appRegistry").orderBy("displayName").get(),
     db.collection("admins").orderBy("createdAt").get(),
     db.collection("adminInvites").orderBy("createdAt").get(),
+    db.collection("accessRequests").orderBy("requestedAt", "desc").get(),
   ]);
   return {
     users: users.docs.map(serialize),
@@ -77,6 +80,7 @@ export const getAdminData = onCall(async (request) => {
       ...admins.docs.map((doc) => ({ ...serialize(doc), uid: doc.id, pending: false })),
       ...invites.docs.map((doc) => ({ ...serialize(doc), pending: true })),
     ],
+    requests: requests.docs.map(serialize),
   };
 });
 
@@ -196,4 +200,97 @@ export const checkMyAccess = onCall(async (request) => {
   ]);
   const allowed = user.exists && user.data()?.active === true && user.data()?.apps?.[appId] === true && app.exists && app.data()?.active === true;
   return { allowed, active: user.data()?.active === true };
+});
+
+export const requestAppAccess = onCall(async (request) => {
+  const identity = requireGoogleIdentity(request);
+  const appId = cleanText((request.data as { appId?: unknown; message?: unknown } | undefined)?.appId, 256);
+  const message = cleanText((request.data as { message?: unknown } | undefined)?.message, 500);
+  if (!appId) throw new HttpsError("invalid-argument", "Firebase App ID is required.");
+
+  const appRef = db.collection("appRegistry").doc(appId);
+  const userRef = db.collection("accessUsers").doc(identity.email);
+  const keyRef = db.collection("accessRequestKeys").doc(requestKey(identity.uid, appId));
+  const newRequestRef = db.collection("accessRequests").doc();
+
+  return db.runTransaction(async (transaction) => {
+    const [app, user, key] = await Promise.all([
+      transaction.get(appRef),
+      transaction.get(userRef),
+      transaction.get(keyRef),
+    ]);
+    if (!app.exists || app.data()?.active !== true) throw new HttpsError("not-found", "This Firebase web app is not available for access requests.");
+    if (user.exists && user.data()?.active === true && user.data()?.apps?.[appId] === true) return { status: "already-approved" };
+
+    if (key.exists) {
+      const existingId = cleanText(key.data()?.requestId, 256);
+      if (existingId) {
+        const existing = await transaction.get(db.collection("accessRequests").doc(existingId));
+        if (existing.exists && existing.data()?.status === "pending") return { status: "pending", requestId: existingId };
+      }
+    }
+
+    const keyHash = requestKey(identity.uid, appId);
+    transaction.create(newRequestRef, {
+      email: identity.email,
+      uid: identity.uid,
+      displayName: identity.name,
+      firebaseAppId: appId,
+      appDisplayName: cleanText(app.data()?.displayName) || "Unnamed Firebase app",
+      status: "pending",
+      requestedAt: FieldValue.serverTimestamp(),
+      reviewedAt: null,
+      reviewedBy: null,
+      reviewedByEmail: null,
+      message,
+      keyHash,
+    });
+    transaction.set(keyRef, { requestId: newRequestRef.id, uid: identity.uid, firebaseAppId: appId, createdAt: FieldValue.serverTimestamp() });
+    return { status: "created", requestId: newRequestRef.id };
+  });
+});
+
+export const reviewAccessRequest = onCall(async (request) => {
+  const admin = await requireAdmin(request);
+  const input = (request.data || {}) as { requestId?: unknown; decision?: unknown; note?: unknown };
+  const requestId = cleanText(input.requestId, 256);
+  const decision = cleanText(input.decision, 20);
+  const note = cleanText(input.note, 500);
+  if (!requestId || !["approved", "rejected"].includes(decision)) throw new HttpsError("invalid-argument", "A valid request and decision are required.");
+
+  const accessRequestRef = db.collection("accessRequests").doc(requestId);
+  return db.runTransaction(async (transaction) => {
+    const accessRequest = await transaction.get(accessRequestRef);
+    if (!accessRequest.exists) throw new HttpsError("not-found", "Access request not found.");
+    const value = accessRequest.data()!;
+    if (value.status !== "pending") throw new HttpsError("failed-precondition", "This access request has already been reviewed.");
+
+    if (decision === "approved") {
+      const email = normalizeEmail(value.email);
+      const appId = cleanText(value.firebaseAppId, 256);
+      if (!emailPattern.test(email) || !appId) throw new HttpsError("failed-precondition", "The request contains invalid account or app data.");
+      const userRef = db.collection("accessUsers").doc(email);
+      const user = await transaction.get(userRef);
+      const existing = user.data() || {};
+      transaction.set(userRef, {
+        email,
+        displayName: cleanText(existing.displayName) || cleanText(value.displayName),
+        role: "user",
+        active: user.exists ? existing.active === true : true,
+        apps: { ...(existing.apps || {}), [appId]: true },
+        createdAt: user.exists ? existing.createdAt || FieldValue.serverTimestamp() : FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+
+    transaction.update(accessRequestRef, {
+      status: decision,
+      reviewedAt: FieldValue.serverTimestamp(),
+      reviewedBy: admin.uid,
+      reviewedByEmail: admin.email,
+      reviewNote: note,
+    });
+    if (value.keyHash) transaction.delete(db.collection("accessRequestKeys").doc(String(value.keyHash)));
+    return { status: decision };
+  });
 });
