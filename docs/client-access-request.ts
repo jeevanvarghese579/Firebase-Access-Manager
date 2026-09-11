@@ -9,6 +9,7 @@ export type AccessGateState =
   | { kind: "denied"; message: string; requestAccess: () => Promise<AccessGateState> }
   | { kind: "pending"; message: string }
   | { kind: "rejected"; message: string }
+  | { kind: "inactive"; message: string }
   | { kind: "requested"; message: string };
 
 // Call after Google sign-in. Render the returned requestAccess action as an
@@ -27,6 +28,7 @@ export async function checkAccessWithRequestOption(
   if (check.data.allowed) return { kind: "allowed" };
   if (check.data.requestStatus === "pending") return { kind: "pending", message: "Your access request is awaiting administrator approval." };
   if (check.data.requestStatus === "rejected") return { kind: "rejected", message: "Your access request was not approved. Contact an administrator if you need this decision reviewed." };
+  if (check.data.requestStatus === "approved") return { kind: "inactive", message: "Access was approved, but this account or application is currently inactive. Contact an administrator." };
 
   return {
     kind: "denied",
@@ -34,7 +36,8 @@ export async function checkAccessWithRequestOption(
     requestAccess: async () => {
       const requestAppAccess = httpsCallable<{ appId: string; requestType: string }, { status: "created" | "pending" | "approved" | "rejected" | "already-approved" }>(functions, "requestAppAccess");
       const result = await requestAppAccess({ appId, requestType });
-      if (result.data.status === "already-approved" || result.data.status === "approved") return { kind: "allowed" };
+      if (result.data.status === "already-approved") return { kind: "allowed" };
+      if (result.data.status === "approved") return { kind: "inactive", message: "Access was approved, but this account or application is currently inactive. Contact an administrator." };
       if (result.data.status === "pending") {
         return { kind: "pending", message: "Your access request is awaiting administrator approval." };
       }
