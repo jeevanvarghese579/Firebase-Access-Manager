@@ -12,11 +12,14 @@ export interface WebApp {
 
 export interface AccessUser {
   id: string;
+  uid?: string;
   email: string;
   displayName: string;
   role: string;
   active: boolean;
   apps: Record<string, boolean>;
+  providerIds?: string[];
+  pendingIdentity?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -45,9 +48,11 @@ export interface AccessRequest {
   email: string;
   uid: string;
   displayName: string;
+  providerIds?: string[];
   firebaseAppId: string;
   appDisplayName: string;
   status: RequestStatus;
+  requestType?: "new-account" | "access-request";
   requestedAt?: string;
   reviewedAt?: string;
   reviewedBy?: string;

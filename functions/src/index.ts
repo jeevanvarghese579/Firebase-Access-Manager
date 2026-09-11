@@ -21,16 +21,68 @@ function projectId() {
   catch { throw new HttpsError("internal", "Firebase project configuration is unavailable."); }
 }
 
-function requireGoogleIdentity(request: CallableRequest<unknown>) {
-  const email = normalizeEmail(request.auth?.token.email);
-  if (!request.auth || !email || request.auth.token.email_verified !== true || request.auth.token.firebase?.sign_in_provider !== "google.com") {
-    throw new HttpsError("unauthenticated", "Sign in with a verified Google account.");
+interface TrustedIdentity {
+  uid: string;
+  email: string;
+  name: string;
+  emailVerified: boolean;
+  providerIds: string[];
+  mayClaimEmailRecords: boolean;
+}
+
+async function requireIdentity(request: CallableRequest<unknown>, requireVerifiedPassword = false): Promise<TrustedIdentity> {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Sign in with Firebase Authentication.");
+  const user = await getAuth().getUser(request.auth.uid);
+  const email = normalizeEmail(user.email || request.auth.token.email);
+  if (!email) throw new HttpsError("failed-precondition", "Your Firebase account must have an email address.");
+  const providerIds = [...new Set(user.providerData.map((provider) => provider.providerId).filter(Boolean))].sort();
+  const emailVerified = user.emailVerified === true;
+  if (requireVerifiedPassword && providerIds.includes("password") && !emailVerified) {
+    throw new HttpsError("failed-precondition", "Verify your email address before requesting application access.");
   }
-  return { uid: request.auth.uid, email, name: cleanText(request.auth.token.name) };
+  let mayClaimEmailRecords = false;
+  try { mayClaimEmailRecords = (await getAuth().getUserByEmail(email)).uid === user.uid; } catch { /* No unique email owner. */ }
+  return { uid: user.uid, email, name: cleanText(user.displayName || request.auth.token.name), emailVerified, providerIds, mayClaimEmailRecords };
+}
+
+async function resolveUserAccess(identity: TrustedIdentity) {
+  const canonicalRef = db.collection("accessUsers").doc(identity.uid);
+  const legacyRef = db.collection("accessUsers").doc(identity.email);
+  const inviteRef = db.collection("accessInvites").doc(identity.email);
+  return db.runTransaction(async (transaction) => {
+    const [canonical, legacy, invite] = await Promise.all([
+      transaction.get(canonicalRef),
+      identity.mayClaimEmailRecords && identity.email !== identity.uid ? transaction.get(legacyRef) : Promise.resolve(null),
+      identity.mayClaimEmailRecords ? transaction.get(inviteRef) : Promise.resolve(null),
+    ]);
+    const canonicalData = canonical.data() || {};
+    const legacyData = legacy?.data() || {};
+    const inviteData = invite?.data() || {};
+    const shouldMigrate = canonical.exists || legacy?.exists || invite?.exists;
+    if (!shouldMigrate) return null;
+    const apps = { ...(legacyData.apps || {}), ...(inviteData.apps || {}), ...(canonicalData.apps || {}) };
+    const active = canonical.exists ? canonicalData.active === true : legacy?.exists ? legacyData.active === true : inviteData.active === true;
+    const value = {
+      uid: identity.uid,
+      email: identity.email,
+      displayName: cleanText(canonicalData.displayName) || cleanText(legacyData.displayName) || cleanText(inviteData.displayName) || identity.name,
+      providerIds: identity.providerIds,
+      role: cleanText(canonicalData.role) || cleanText(legacyData.role) || cleanText(inviteData.role) || "user",
+      active,
+      apps,
+      createdAt: canonicalData.createdAt || legacyData.createdAt || inviteData.createdAt || FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+    transaction.set(canonicalRef, value, { merge: true });
+    if (legacy?.exists && legacyRef.path !== canonicalRef.path) transaction.delete(legacyRef);
+    if (invite?.exists) transaction.delete(inviteRef);
+    return value;
+  });
 }
 
 async function requireAdmin(request: CallableRequest<unknown>) {
-  const identity = requireGoogleIdentity(request);
+  const identity = await requireIdentity(request);
+  if (!identity.emailVerified) throw new HttpsError("permission-denied", "Administrator email verification is required.");
   const adminRef = db.collection("admins").doc(identity.uid);
   const admin = await adminRef.get();
   if (admin.exists && admin.data()?.active === true && normalizeEmail(admin.data()?.email) === identity.email) return identity;
@@ -66,15 +118,19 @@ function serialize(snapshot: FirebaseFirestore.QueryDocumentSnapshot) {
 
 export const getAdminData = onCall(async (request) => {
   await requireAdmin(request);
-  const [users, apps, admins, invites, requests] = await Promise.all([
+  const [users, accessInvites, apps, admins, invites, requests] = await Promise.all([
     db.collection("accessUsers").orderBy("updatedAt", "desc").get(),
+    db.collection("accessInvites").orderBy("createdAt", "desc").get(),
     db.collection("appRegistry").orderBy("displayName").get(),
     db.collection("admins").orderBy("createdAt").get(),
     db.collection("adminInvites").orderBy("createdAt").get(),
     db.collection("accessRequests").orderBy("requestedAt", "desc").get(),
   ]);
   return {
-    users: users.docs.map(serialize),
+    users: [
+      ...users.docs.map(serialize),
+      ...accessInvites.docs.map((doc) => ({ ...serialize(doc), uid: null, providerIds: [], pendingIdentity: true })),
+    ],
     apps: apps.docs.map(serialize),
     admins: [
       ...admins.docs.map((doc) => ({ ...serialize(doc), uid: doc.id, pending: false })),
@@ -140,25 +196,35 @@ export const saveAccessUser = onCall(async (request) => {
   const allowedIds = new Set(appDocs.docs.map((doc) => doc.id));
   const apps: Record<string, boolean> = {};
   for (const [id, enabled] of Object.entries(requestedApps)) if (allowedIds.has(id)) apps[id] = enabled === true;
-  const ref = db.collection("accessUsers").doc(email);
-  const current = await ref.get();
-  await ref.set({
-    email,
-    displayName: cleanText(input.displayName),
-    role: "user",
-    active: input.active === true,
-    apps,
-    createdAt: current.exists ? current.data()?.createdAt || FieldValue.serverTimestamp() : FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-  });
+  let authUser;
+  try { authUser = await getAuth().getUserByEmail(email); } catch (error: unknown) {
+    if ((error as { code?: string }).code !== "auth/user-not-found") throw error;
+  }
+  const requestedId = cleanText(input.id, 256);
+  const knownUid = requestedId && requestedId !== email && !input.pendingIdentity ? requestedId : authUser?.uid;
+  if (knownUid) {
+    const ref = db.collection("accessUsers").doc(knownUid);
+    const current = await ref.get();
+    const providerIds = authUser?.uid === knownUid ? [...new Set(authUser.providerData.map((provider) => provider.providerId))].sort() : current.data()?.providerIds || [];
+    await ref.set({ uid: knownUid, email, displayName: cleanText(input.displayName), providerIds, role: cleanText(current.data()?.role) || "user", active: input.active === true, apps, createdAt: current.exists ? current.data()?.createdAt || FieldValue.serverTimestamp() : FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+    await db.collection("accessInvites").doc(email).delete();
+    if (requestedId === email && knownUid !== email) await db.collection("accessUsers").doc(email).delete();
+  } else {
+    const ref = db.collection("accessInvites").doc(email);
+    const current = await ref.get();
+    await ref.set({ email, displayName: cleanText(input.displayName), role: cleanText(current.data()?.role) || "user", active: input.active === true, apps, createdAt: current.exists ? current.data()?.createdAt || FieldValue.serverTimestamp() : FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+  }
   return { ok: true };
 });
 
 export const deleteAccessUser = onCall(async (request) => {
   await requireAdmin(request);
-  const email = normalizeEmail((request.data as { email?: unknown } | undefined)?.email);
+  const input = (request.data || {}) as { id?: unknown; email?: unknown; pendingIdentity?: unknown };
+  const email = normalizeEmail(input.email);
   if (!emailPattern.test(email)) throw new HttpsError("invalid-argument", "A valid email is required.");
-  await db.collection("accessUsers").doc(email).delete();
+  const id = cleanText(input.id, 256);
+  if (input.pendingIdentity === true) await db.collection("accessInvites").doc(email).delete();
+  else await db.collection("accessUsers").doc(id || email).delete();
   return { ok: true };
 });
 
@@ -191,25 +257,30 @@ export const setAdminStatus = onCall(async (request) => {
 });
 
 export const checkMyAccess = onCall(async (request) => {
-  const identity = requireGoogleIdentity(request);
+  const identity = await requireIdentity(request);
   const appId = cleanText((request.data as { appId?: unknown } | undefined)?.appId, 256);
   if (!appId) throw new HttpsError("invalid-argument", "Firebase App ID is required.");
+  await resolveUserAccess(identity);
   const [user, app] = await Promise.all([
-    db.collection("accessUsers").doc(identity.email).get(),
+    db.collection("accessUsers").doc(identity.uid).get(),
     db.collection("appRegistry").doc(appId).get(),
   ]);
   const allowed = user.exists && user.data()?.active === true && user.data()?.apps?.[appId] === true && app.exists && app.data()?.active === true;
-  return { allowed, active: user.data()?.active === true };
+  const state = allowed ? null : await db.collection("accessRequestKeys").doc(requestKey(identity.uid, appId)).get();
+  return { allowed, active: user.data()?.active === true, requestStatus: state?.data()?.status || null, uid: identity.uid, providerIds: identity.providerIds, role: cleanText(user.data()?.role) || null };
 });
 
 export const requestAppAccess = onCall(async (request) => {
-  const identity = requireGoogleIdentity(request);
-  const appId = cleanText((request.data as { appId?: unknown; message?: unknown } | undefined)?.appId, 256);
-  const message = cleanText((request.data as { message?: unknown } | undefined)?.message, 500);
+  const identity = await requireIdentity(request, true);
+  const input = (request.data || {}) as { appId?: unknown; message?: unknown; requestType?: unknown };
+  const appId = cleanText(input.appId, 256);
+  const message = cleanText(input.message, 500);
+  const requestType = input.requestType === "new-account" ? "new-account" : "access-request";
   if (!appId) throw new HttpsError("invalid-argument", "Firebase App ID is required.");
 
+  await resolveUserAccess(identity);
   const appRef = db.collection("appRegistry").doc(appId);
-  const userRef = db.collection("accessUsers").doc(identity.email);
+  const userRef = db.collection("accessUsers").doc(identity.uid);
   const keyRef = db.collection("accessRequestKeys").doc(requestKey(identity.uid, appId));
   const newRequestRef = db.collection("accessRequests").doc();
 
@@ -227,6 +298,8 @@ export const requestAppAccess = onCall(async (request) => {
       if (existingId) {
         const existing = await transaction.get(db.collection("accessRequests").doc(existingId));
         if (existing.exists && existing.data()?.status === "pending") return { status: "pending", requestId: existingId };
+        if (existing.exists && existing.data()?.status === "rejected") return { status: "rejected", requestId: existingId };
+        if (existing.exists && existing.data()?.status === "approved") return { status: "approved", requestId: existingId };
       }
     }
 
@@ -235,9 +308,11 @@ export const requestAppAccess = onCall(async (request) => {
       email: identity.email,
       uid: identity.uid,
       displayName: identity.name,
+      providerIds: identity.providerIds,
       firebaseAppId: appId,
       appDisplayName: cleanText(app.data()?.displayName) || "Unnamed Firebase app",
       status: "pending",
+      requestType,
       requestedAt: FieldValue.serverTimestamp(),
       reviewedAt: null,
       reviewedBy: null,
@@ -245,7 +320,7 @@ export const requestAppAccess = onCall(async (request) => {
       message,
       keyHash,
     });
-    transaction.set(keyRef, { requestId: newRequestRef.id, uid: identity.uid, firebaseAppId: appId, createdAt: FieldValue.serverTimestamp() });
+    transaction.set(keyRef, { requestId: newRequestRef.id, uid: identity.uid, firebaseAppId: appId, status: "pending", createdAt: FieldValue.serverTimestamp() });
     return { status: "created", requestId: newRequestRef.id };
   });
 });
@@ -267,15 +342,18 @@ export const reviewAccessRequest = onCall(async (request) => {
 
     if (decision === "approved") {
       const email = normalizeEmail(value.email);
+      const uid = cleanText(value.uid, 256);
       const appId = cleanText(value.firebaseAppId, 256);
-      if (!emailPattern.test(email) || !appId) throw new HttpsError("failed-precondition", "The request contains invalid account or app data.");
-      const userRef = db.collection("accessUsers").doc(email);
+      if (!emailPattern.test(email) || !uid || !appId) throw new HttpsError("failed-precondition", "The request contains invalid account or app data.");
+      const userRef = db.collection("accessUsers").doc(uid);
       const user = await transaction.get(userRef);
       const existing = user.data() || {};
       transaction.set(userRef, {
+        uid,
         email,
         displayName: cleanText(existing.displayName) || cleanText(value.displayName),
-        role: "user",
+        providerIds: Array.isArray(value.providerIds) ? value.providerIds : existing.providerIds || [],
+        role: cleanText(existing.role) || "user",
         active: user.exists ? existing.active === true : true,
         apps: { ...(existing.apps || {}), [appId]: true },
         createdAt: user.exists ? existing.createdAt || FieldValue.serverTimestamp() : FieldValue.serverTimestamp(),
@@ -290,7 +368,7 @@ export const reviewAccessRequest = onCall(async (request) => {
       reviewedByEmail: admin.email,
       reviewNote: note,
     });
-    if (value.keyHash) transaction.delete(db.collection("accessRequestKeys").doc(String(value.keyHash)));
+    if (value.keyHash) transaction.set(db.collection("accessRequestKeys").doc(String(value.keyHash)), { requestId, uid: value.uid, firebaseAppId: value.firebaseAppId, status: decision, reviewedAt: FieldValue.serverTimestamp() }, { merge: true });
     return { status: decision };
   });
 });

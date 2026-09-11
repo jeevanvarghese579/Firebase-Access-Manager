@@ -2,16 +2,22 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isGoogleUser() {
+    function isAuthenticatedUser() {
       return request.auth != null
-        && request.auth.token.email != null
-        && request.auth.token.firebase.sign_in_provider == 'google.com';
+        && request.auth.token.email != null;
     }
 
-    function isApprovedAscensionUser() {
-      return isGoogleUser()
-        && exists(/databases/$(database)/documents/invitedEmails/$(request.auth.token.email.lower()))
-        && get(/databases/$(database)/documents/invitedEmails/$(request.auth.token.email.lower())).data.active == true;
+    function ascensionFirebaseAppId() {
+      return '1:379503088311:web:7b5117cc3447eded133332';
+    }
+
+    function hasAscensionManagerAccess() {
+      return isAuthenticatedUser()
+        && exists(/databases/$(database)/documents/accessUsers/$(request.auth.uid))
+        && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.active == true
+        && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.apps[ascensionFirebaseAppId()] == true
+        && exists(/databases/$(database)/documents/appRegistry/$(ascensionFirebaseAppId()))
+        && get(/databases/$(database)/documents/appRegistry/$(ascensionFirebaseAppId())).data.active == true;
     }
 
     // Existing shared-project behavior retained unchanged.
@@ -20,15 +26,15 @@ service cloud.firestore {
     }
 
     match /invitedEmails/{email} {
-      allow get: if isGoogleUser() && email == request.auth.token.email.lower();
+      allow get: if isAuthenticatedUser() && email == request.auth.token.email.lower();
       allow list, create, update, delete: if false;
     }
 
     match /ascensionManagerUsers/{userId} {
-      allow read, write: if isApprovedAscensionUser() && request.auth.uid == userId;
+      allow read, write: if hasAscensionManagerAccess() && request.auth.uid == userId;
 
       match /{document=**} {
-        allow read, write: if isApprovedAscensionUser() && request.auth.uid == userId;
+        allow read, write: if hasAscensionManagerAccess() && request.auth.uid == userId;
       }
     }
 
@@ -41,6 +47,9 @@ service cloud.firestore {
       allow read, write: if false;
     }
     match /accessUsers/{document=**} {
+      allow read, write: if false;
+    }
+    match /accessInvites/{document=**} {
       allow read, write: if false;
     }
     match /appRegistry/{document=**} {
