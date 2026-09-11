@@ -52,7 +52,7 @@ npm --prefix functions run build
 firebase deploy --only functions:access-manager,firestore:rules,hosting --project inter-level-progress-manager
 ```
 
-The current Firebase project is on the no-billing plan, which allows Hosting and rules deployment but blocks creation of the new Cloud Functions. Link a billing account / upgrade to Blaze, then run the command above to activate the secured dashboard backend. The function code does not need any source changes.
+The Access Manager Functions are deployed on the Blaze plan in the separate `access-manager` codebase.
 
 Enable Google as an Authentication provider. The Firebase Management API (`firebase.googleapis.com`) must be enabled, and the Cloud Functions runtime service account must have permission to list Firebase apps. Cloud Functions, Cloud Build, Artifact Registry, Eventarc, Pub/Sub, and Cloud Run APIs may also be enabled by Firebase during first deployment.
 
