@@ -31,6 +31,8 @@ interface TrustedIdentity {
   mayClaimEmailRecords: boolean;
 }
 
+const ASCENSION_MANAGER_APP_ID = "1:379503088311:web:7b5117cc3447eded133332";
+
 async function requireIdentity(request: CallableRequest<unknown>): Promise<TrustedIdentity> {
   if (!request.auth) throw new HttpsError("unauthenticated", "Sign in with Firebase Authentication.");
   const user = await getAuth().getUser(request.auth.uid);
@@ -48,25 +50,37 @@ async function resolveUserAccess(identity: TrustedIdentity) {
   const canonicalRef = db.collection("accessUsers").doc(identity.uid);
   const legacyRef = db.collection("accessUsers").doc(identity.email);
   const inviteRef = db.collection("accessInvites").doc(identity.email);
+  const ascensionInviteRef = db.collection("invitedEmails").doc(identity.email);
   return db.runTransaction(async (transaction) => {
-    const [canonical, legacy, invite] = await Promise.all([
+    const [canonical, legacy, invite, ascensionInvite] = await Promise.all([
       transaction.get(canonicalRef),
       identity.mayClaimEmailRecords && identity.email !== identity.uid ? transaction.get(legacyRef) : Promise.resolve(null),
       identity.mayClaimEmailRecords ? transaction.get(inviteRef) : Promise.resolve(null),
+      identity.mayClaimEmailRecords ? transaction.get(ascensionInviteRef) : Promise.resolve(null),
     ]);
     const canonicalData = canonical.data() || {};
     const legacyData = legacy?.data() || {};
     const inviteData = invite?.data() || {};
-    const shouldMigrate = canonical.exists || legacy?.exists || invite?.exists;
+    const ascensionInviteData = ascensionInvite?.data() || {};
+    const shouldMigrate = canonical.exists || legacy?.exists || invite?.exists || ascensionInvite?.exists;
     if (!shouldMigrate) return null;
-    const apps = { ...(legacyData.apps || {}), ...(inviteData.apps || {}), ...(canonicalData.apps || {}) };
-    const active = canonical.exists ? canonicalData.active === true : legacy?.exists ? legacyData.active === true : inviteData.active === true;
+    const legacyAscensionApps = ascensionInvite?.exists && ascensionInviteData.active === true
+      ? { [ASCENSION_MANAGER_APP_ID]: true }
+      : {};
+    const apps = { ...legacyAscensionApps, ...(legacyData.apps || {}), ...(inviteData.apps || {}), ...(canonicalData.apps || {}) };
+    const active = canonical.exists
+      ? canonicalData.active === true
+      : legacy?.exists
+        ? legacyData.active === true
+        : invite?.exists
+          ? inviteData.active === true
+          : ascensionInviteData.active === true;
     const value = {
       uid: identity.uid,
       email: identity.email,
       displayName: cleanText(canonicalData.displayName) || cleanText(legacyData.displayName) || cleanText(inviteData.displayName) || identity.name,
       providerIds: identity.providerIds,
-      role: cleanText(canonicalData.role) || cleanText(legacyData.role) || cleanText(inviteData.role) || "user",
+      role: cleanText(canonicalData.role) || cleanText(legacyData.role) || cleanText(inviteData.role) || cleanText(ascensionInviteData.role) || "user",
       active,
       apps,
       createdAt: canonicalData.createdAt || legacyData.createdAt || inviteData.createdAt || FieldValue.serverTimestamp(),
@@ -279,6 +293,16 @@ export const checkMyAccess = onCall(async (request) => {
     db.collection("appRegistry").doc(appId).get(),
   ]);
   const allowed = user.exists && user.data()?.active === true && user.data()?.apps?.[appId] === true && app.exists && app.data()?.active === true;
+  const resolvedPermission = {
+    userDocumentPath: `accessUsers/${identity.uid}`,
+    userExists: user.exists,
+    userActive: user.data()?.active === true,
+    appPermission: user.data()?.apps?.[appId] === true,
+    appDocumentPath: `appRegistry/${appId}`,
+    appExists: app.exists,
+    appActive: app.data()?.active === true,
+  };
+  console.info("Access check resolved", { uid: identity.uid, email: identity.email, appId, allowed, ...resolvedPermission });
   const state = allowed ? null : await db.collection("accessRequestKeys").doc(requestKey(identity.uid, appId)).get();
   return {
     allowed,
@@ -289,6 +313,7 @@ export const checkMyAccess = onCall(async (request) => {
     signInProvider: identity.signInProvider,
     emailVerified: identity.emailVerified,
     requireEmailVerification: app.exists && app.data()?.requireEmailVerification === true,
+    resolvedPermission,
     role: cleanText(user.data()?.role) || null,
   };
 });
