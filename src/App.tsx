@@ -183,7 +183,7 @@ function App() {
   return (
     <div className="shell">
       <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
-        <div className="brand"><span className="brand-mark"><Shield size={19} /></span><span>Access Manager<small>Firebase administration</small></span></div>
+        <div className="brand"><BrandIcon /><span>Access Manager<small>Firebase administration</small></span></div>
         <nav>
           {nav.map(({ id, label, icon: Icon }) => (
             <button key={id} className={view === id ? "active" : ""} onClick={() => { setView(id); setMobileNav(false); }}>
@@ -222,17 +222,18 @@ function App() {
 }
 
 function LoadingScreen() {
-  return <div className="loading-screen"><span className="brand-mark"><Shield size={24} /></span><LoaderCircle className="spin" size={24} /><p>Securing your workspace…</p></div>;
+  return <div className="loading-screen"><BrandIcon /><LoaderCircle className="spin" size={24} /><p>Securing your workspace…</p></div>;
 }
 
 function Login({ onLogin, error, loading }: { onLogin: () => void; error: string; loading: boolean }) {
   return <div className="login-page">
-    <div className="login-visual"><div className="login-brand"><span className="brand-mark"><Shield size={22} /></span>Firebase Access Manager</div><div className="visual-copy"><span>ADMIN CONTROL PANEL</span><h1>One secure place for every app and account.</h1><p>Control who can access each Firebase web app without exposing privileged credentials.</p></div><div className="trust-row"><span><CircleCheck size={16} />Admin verified</span><span><CircleCheck size={16} />Server enforced</span><span><CircleCheck size={16} />Always in sync</span></div></div>
+    <div className="login-visual"><div className="login-brand"><BrandIcon />Firebase Access Manager</div><div className="visual-copy"><span>ADMIN CONTROL PANEL</span><h1>One secure place for every app and account.</h1><p>Control who can access each Firebase web app without exposing privileged credentials.</p></div><div className="trust-row"><span><CircleCheck size={16} />Admin verified</span><span><CircleCheck size={16} />Server enforced</span><span><CircleCheck size={16} />Always in sync</span></div></div>
     <div className="login-panel"><div className="login-card"><span className="eyebrow">SECURE SIGN IN</span><h2>Welcome back</h2><p>Sign in with an approved administrator account to continue.</p>{error && <div className="login-error"><CircleAlert size={17} />{error}</div>}<button className="google-button" onClick={onLogin} disabled={loading}><GoogleIcon />{loading ? "Verifying account…" : "Continue with Google"}</button><div className="security-note"><Shield size={17} /><span><strong>Restricted administration</strong>Your account is verified against the protected administrator registry after sign-in.</span></div></div><p className="login-footer">Firebase project · inter-level-progress-manager</p></div>
   </div>;
 }
 
 function GoogleIcon() { return <span className="google-icon">G</span>; }
+function BrandIcon() { return <span className="brand-mark"><img src="/app-icon.png" alt="" /></span>; }
 
 function PageHead({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: React.ReactNode }) {
   return <div className="page-head"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{description}</p></div>{action}</div>;
