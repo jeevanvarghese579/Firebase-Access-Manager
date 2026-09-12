@@ -4,12 +4,19 @@ service cloud.firestore {
   match /databases/{database}/documents {
     function isAuthenticatedUser() {
       return request.auth != null
-        && request.auth.token.email != null
-        && request.auth.token.email_verified == true;
+        && request.auth.token.email != null;
     }
 
     function ascensionFirebaseAppId() {
       return '1:379503088311:web:7b5117cc3447eded133332';
+    }
+
+    function hasCollageMakerAccess(uid) {
+      return request.auth != null
+        && request.auth.uid == uid
+        && get(/databases/$(database)/documents/accessUsers/$(uid)).data.active == true
+        && get(/databases/$(database)/documents/accessUsers/$(uid)).data.apps['1:379503088311:web:6a63dfcd8523e9f8133332'] == true
+        && get(/databases/$(database)/documents/appRegistry/1:379503088311:web:6a63dfcd8523e9f8133332).data.active == true;
     }
 
     function hasAscensionManagerAccess() {
@@ -30,9 +37,9 @@ service cloud.firestore {
         );
     }
 
-    // Existing shared-project behavior retained unchanged.
+    // Preserve the currently deployed Collage Maker rule exactly.
     match /users/{uid}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read, write: if hasCollageMakerAccess(uid);
     }
 
     match /invitedEmails/{email} {

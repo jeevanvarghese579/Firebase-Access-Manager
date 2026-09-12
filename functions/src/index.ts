@@ -302,7 +302,15 @@ export const checkMyAccess = onCall(async (request) => {
     appExists: app.exists,
     appActive: app.data()?.active === true,
   };
-  console.info("Access check resolved", { uid: identity.uid, email: identity.email, appId, allowed, ...resolvedPermission });
+  const canonicalAccessDocument = {
+    path: `accessUsers/${identity.uid}`,
+    uid: cleanText(user.data()?.uid) || identity.uid,
+    email: normalizeEmail(user.data()?.email),
+    active: user.data()?.active === true,
+    role: cleanText(user.data()?.role) || null,
+    apps: { [appId]: user.data()?.apps?.[appId] === true },
+  };
+  console.info("Access check resolved", { uid: identity.uid, email: identity.email, appId, allowed, canonicalAccessDocument, ...resolvedPermission });
   const state = allowed ? null : await db.collection("accessRequestKeys").doc(requestKey(identity.uid, appId)).get();
   return {
     allowed,
@@ -314,6 +322,7 @@ export const checkMyAccess = onCall(async (request) => {
     emailVerified: identity.emailVerified,
     requireEmailVerification: app.exists && app.data()?.requireEmailVerification === true,
     resolvedPermission,
+    canonicalAccessDocument,
     role: cleanText(user.data()?.role) || null,
   };
 });
