@@ -19,6 +19,7 @@ Admin-only control panel for assigning Firebase Authentication users to Firebase
 - `accessUsers/{uid}` — canonical UID, normalized email, display name, provider IDs, global status, and an `apps` map keyed by Firebase App ID.
 - `accessInvites/{normalizedEmail}` — pre-approved app permissions for someone without a Firebase UID.
 - `appRegistry/{firebaseAppId}` — safe discovered app metadata and availability.
+- `appRegistry/{firebaseAppId}.requireEmailVerification` — per-app boolean; missing values default to `false` for backward compatibility.
 - `accessRequests/{requestId}` — trusted identity/provider data, requested app, request type, status, timestamps, reviewer, and notes.
 - `accessRequestKeys/{sha256(uid:appId)}` — current request state and uniqueness lock for one UID/app pair.
 
@@ -26,6 +27,7 @@ Admin-only control panel for assigning Firebase Authentication users to Firebase
 
 - `getAdminData` — admin-only dashboard, user, provider, app, and request data.
 - `listFirebaseWebApps` — admin-only Firebase Management API sync.
+- `setAppSettings` — admin-only update of per-app request settings.
 - `saveAccessUser` / `deleteAccessUser` — admin-only UID access or email preapproval management.
 - `saveAdmin` / `setAdminStatus` — admin-only administrator management.
 - `checkMyAccess` — lets any authenticated Firebase user check their UID-based access and request state.
@@ -63,7 +65,7 @@ The client check gates navigation only. Browser-supplied `appId` is not a securi
 
 Reuse [`docs/client-access-request.ts`](docs/client-access-request.ts) for the explicit **Request Access** button and password-signup flow. UID, email, verification state, and providers come only from Firebase Admin. Clients submit their configured App ID and a display-only request type. Existing pending/rejected states do not produce duplicate requests.
 
-Password signup deliberately separates account creation from authorization: create the Firebase account, send the verification email, sign out, and let the verified user sign in and explicitly request access. Unverified password users cannot create new requests. This does not retroactively disable existing legacy approvals.
+Password signup deliberately separates account creation from authorization. For apps where `requireEmailVerification` is `false` or absent, a newly authenticated password user may request access immediately. When it is `true`, `requestAppAccess` rejects an unverified password session and the client should send Firebase's verification email before retrying. Google sessions and existing approved users are unaffected.
 
 ## UID migration and provider linking
 

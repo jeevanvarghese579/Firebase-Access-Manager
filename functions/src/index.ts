@@ -27,22 +27,21 @@ interface TrustedIdentity {
   name: string;
   emailVerified: boolean;
   providerIds: string[];
+  signInProvider: string;
   mayClaimEmailRecords: boolean;
 }
 
-async function requireIdentity(request: CallableRequest<unknown>, requireVerifiedPassword = false): Promise<TrustedIdentity> {
+async function requireIdentity(request: CallableRequest<unknown>): Promise<TrustedIdentity> {
   if (!request.auth) throw new HttpsError("unauthenticated", "Sign in with Firebase Authentication.");
   const user = await getAuth().getUser(request.auth.uid);
   const email = normalizeEmail(user.email || request.auth.token.email);
   if (!email) throw new HttpsError("failed-precondition", "Your Firebase account must have an email address.");
   const providerIds = [...new Set(user.providerData.map((provider) => provider.providerId).filter(Boolean))].sort();
   const emailVerified = user.emailVerified === true;
-  if (requireVerifiedPassword && providerIds.includes("password") && !emailVerified) {
-    throw new HttpsError("failed-precondition", "Verify your email address before requesting application access.");
-  }
+  const signInProvider = cleanText(request.auth.token.firebase?.sign_in_provider, 80);
   let mayClaimEmailRecords = false;
   try { mayClaimEmailRecords = (await getAuth().getUserByEmail(email)).uid === user.uid; } catch { /* No unique email owner. */ }
-  return { uid: user.uid, email, name: cleanText(user.displayName || request.auth.token.name), emailVerified, providerIds, mayClaimEmailRecords };
+  return { uid: user.uid, email, name: cleanText(user.displayName || request.auth.token.name), emailVerified, providerIds, signInProvider, mayClaimEmailRecords };
 }
 
 async function resolveUserAccess(identity: TrustedIdentity) {
@@ -171,6 +170,7 @@ export const listFirebaseWebApps = onCall(async (request) => {
   await requireAdmin(request);
   const apps = await fetchFirebaseWebApps();
   const existing = await db.collection("appRegistry").get();
+  const existingById = new Map(existing.docs.map((doc) => [doc.id, doc.data()]));
   const batch = db.batch();
   existing.docs.forEach((doc) => batch.set(doc.ref, { active: false, lastSyncedAt: FieldValue.serverTimestamp() }, { merge: true }));
   apps.forEach((app) => batch.set(db.collection("appRegistry").doc(app.appId), {
@@ -180,10 +180,23 @@ export const listFirebaseWebApps = onCall(async (request) => {
     platform: "WEB",
     state: app.state || "STATE_UNSPECIFIED",
     active: app.state !== "DELETED",
+    requireEmailVerification: existingById.get(app.appId)?.requireEmailVerification === true,
     lastSyncedAt: FieldValue.serverTimestamp(),
   }, { merge: true }));
   await batch.commit();
   return { apps: apps.map((app) => ({ firebaseAppId: app.appId, displayName: app.displayName || "Unnamed Firebase app", projectId: app.projectId || projectId(), platform: "WEB", active: app.state !== "DELETED", state: app.state })) };
+});
+
+export const setAppSettings = onCall(async (request) => {
+  await requireAdmin(request);
+  const input = (request.data || {}) as { firebaseAppId?: unknown; requireEmailVerification?: unknown };
+  const firebaseAppId = cleanText(input.firebaseAppId, 256);
+  if (!firebaseAppId || typeof input.requireEmailVerification !== "boolean") throw new HttpsError("invalid-argument", "A valid Firebase App ID and email-verification setting are required.");
+  const ref = db.collection("appRegistry").doc(firebaseAppId);
+  const app = await ref.get();
+  if (!app.exists || app.data()?.platform !== "WEB") throw new HttpsError("not-found", "Firebase web app not found in the registry.");
+  await ref.set({ requireEmailVerification: input.requireEmailVerification, settingsUpdatedAt: FieldValue.serverTimestamp() }, { merge: true });
+  return { ok: true, requireEmailVerification: input.requireEmailVerification };
 });
 
 export const saveAccessUser = onCall(async (request) => {
@@ -267,11 +280,21 @@ export const checkMyAccess = onCall(async (request) => {
   ]);
   const allowed = user.exists && user.data()?.active === true && user.data()?.apps?.[appId] === true && app.exists && app.data()?.active === true;
   const state = allowed ? null : await db.collection("accessRequestKeys").doc(requestKey(identity.uid, appId)).get();
-  return { allowed, active: user.data()?.active === true, requestStatus: state?.data()?.status || null, uid: identity.uid, providerIds: identity.providerIds, role: cleanText(user.data()?.role) || null };
+  return {
+    allowed,
+    active: user.data()?.active === true,
+    requestStatus: state?.data()?.status || null,
+    uid: identity.uid,
+    providerIds: identity.providerIds,
+    signInProvider: identity.signInProvider,
+    emailVerified: identity.emailVerified,
+    requireEmailVerification: app.exists && app.data()?.requireEmailVerification === true,
+    role: cleanText(user.data()?.role) || null,
+  };
 });
 
 export const requestAppAccess = onCall(async (request) => {
-  const identity = await requireIdentity(request, true);
+  const identity = await requireIdentity(request);
   const input = (request.data || {}) as { appId?: unknown; message?: unknown; requestType?: unknown };
   const appId = cleanText(input.appId, 256);
   const message = cleanText(input.message, 500);
@@ -291,6 +314,9 @@ export const requestAppAccess = onCall(async (request) => {
       transaction.get(keyRef),
     ]);
     if (!app.exists || app.data()?.active !== true) throw new HttpsError("not-found", "This Firebase web app is not available for access requests.");
+    if (app.data()?.requireEmailVerification === true && identity.signInProvider === "password" && !identity.emailVerified) {
+      throw new HttpsError("failed-precondition", "Verify your email address before requesting access to this application.");
+    }
     if (user.exists && user.data()?.active === true && user.data()?.apps?.[appId] === true) return { status: "already-approved" };
 
     if (key.exists) {

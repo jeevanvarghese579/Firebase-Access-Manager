@@ -6,6 +6,7 @@ export interface WebApp {
   projectId: string;
   platform: "WEB";
   active: boolean;
+  requireEmailVerification?: boolean;
   state?: string;
   lastSyncedAt?: string;
 }

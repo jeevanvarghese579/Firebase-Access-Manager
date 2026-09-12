@@ -49,6 +49,7 @@ function App() {
   const [userEditor, setUserEditor] = useState<AccessUser | null | undefined>(undefined);
   const [adminEditor, setAdminEditor] = useState(false);
   const [requestEditor, setRequestEditor] = useState<AccessRequest | null>(null);
+  const [appEditor, setAppEditor] = useState<WebApp | null>(null);
 
   const loadData = useCallback(async (refreshApps = false) => {
     setLoading(true);
@@ -157,6 +158,17 @@ function App() {
     } catch (err) { setError(getMessage(err)); } finally { setLoading(false); }
   }
 
+  async function saveAppSettings(app: WebApp, requireEmailVerification: boolean) {
+    setLoading(true);
+    setError("");
+    try {
+      await call("setAppSettings", { firebaseAppId: app.firebaseAppId, requireEmailVerification });
+      await loadData();
+      setAppEditor(null);
+      setToast("Application settings updated.");
+    } catch (err) { setError(getMessage(err)); } finally { setLoading(false); }
+  }
+
   if (!authReady) return <LoadingScreen />;
   if (!authUser || !authorized) return <Login onLogin={login} error={error} loading={loading} />;
 
@@ -195,7 +207,7 @@ function App() {
           {error && <div className="alert"><CircleAlert size={18} /><span>{error}</span><button onClick={() => setError("")}><X size={17} /></button></div>}
           {view === "dashboard" && <Dashboard data={data} setView={setView} />}
           {view === "users" && <Users data={data} edit={setUserEditor} add={() => setUserEditor(null)} />}
-          {view === "apps" && <Apps apps={data.apps} users={data.users} refresh={refreshApps} syncing={syncing} />}
+          {view === "apps" && <Apps apps={data.apps} users={data.users} refresh={refreshApps} syncing={syncing} open={setAppEditor} />}
           {view === "requests" && <Requests requests={data.requests} open={setRequestEditor} review={reviewRequest} busy={loading} />}
           {view === "admins" && <Admins admins={data.admins} add={() => setAdminEditor(true)} toggle={toggleAdmin} />}
         </section>
@@ -203,6 +215,7 @@ function App() {
       {userEditor !== undefined && <UserModal initial={userEditor} apps={data.apps} close={() => setUserEditor(undefined)} save={saveUser} remove={deleteUser} busy={loading} />}
       {adminEditor && <AdminModal close={() => setAdminEditor(false)} save={saveAdmin} busy={loading} />}
       {requestEditor && <RequestModal request={requestEditor} close={() => setRequestEditor(null)} review={reviewRequest} busy={loading} />}
+      {appEditor && <AppSettingsModal app={appEditor} close={() => setAppEditor(null)} save={saveAppSettings} busy={loading} />}
       {toast && <div className="toast"><CircleCheck size={18} />{toast}</div>}
     </div>
   );
@@ -256,10 +269,10 @@ function Users({ data, edit, add }: { data: AdminData; edit: (u: AccessUser) => 
   </>;
 }
 
-function Apps({ apps, users, refresh, syncing }: { apps: WebApp[]; users: AccessUser[]; refresh: () => void; syncing: boolean }) {
+function Apps({ apps, users, refresh, syncing, open }: { apps: WebApp[]; users: AccessUser[]; refresh: () => void; syncing: boolean; open: (app: WebApp) => void }) {
   return <>
     <PageHead eyebrow="APP REGISTRY" title="Firebase web apps" description="Discovered securely from the Firebase Management API and kept available for assignments." action={<button className="secondary-button" onClick={refresh} disabled={syncing}><RefreshCw className={syncing ? "spin" : ""} size={17} />{syncing ? "Refreshing…" : "Refresh apps"}</button>} />
-    <div className="app-grid">{apps.map((app) => { const count = users.filter((u) => u.active && u.apps?.[app.firebaseAppId]).length; return <article className="app-card" key={app.firebaseAppId}><div className="app-card-top"><span className="app-icon"><AppWindow size={21} /></span><Status active={app.active} label={app.active ? "Available" : "Unavailable"} /></div><h2>{app.displayName}</h2><p>{app.firebaseAppId}</p><div className="app-meta"><span><strong>{count}</strong> users with access</span><span>WEB</span></div></article>; })}{!apps.length && <div className="wide-empty"><Empty icon={Cloud} title="No web apps found" text="Refresh the registry or verify Firebase Management API access." /></div>}</div>
+    <div className="app-grid">{apps.map((app) => { const count = users.filter((u) => u.active && u.apps?.[app.firebaseAppId]).length; return <article className="app-card app-card-button" key={app.firebaseAppId} role="button" tabIndex={0} onClick={() => open(app)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") open(app); }}><div className="app-card-top"><span className="app-icon"><AppWindow size={21} /></span><Status active={app.active} label={app.active ? "Available" : "Unavailable"} /></div><h2>{app.displayName}</h2><p>{app.firebaseAppId}</p><div className="verification-setting"><Shield size={14} /><span>Email verification {app.requireEmailVerification ? "required" : "optional"}</span></div><div className="app-meta"><span><strong>{count}</strong> users with access</span><span>WEB</span></div></article>; })}{!apps.length && <div className="wide-empty"><Empty icon={Cloud} title="No web apps found" text="Refresh the registry or verify Firebase Management API access." /></div>}</div>
   </>;
 }
 
@@ -296,6 +309,11 @@ function UserModal({ initial, apps, close, save, remove, busy }: { initial: Acce
 function AdminModal({ close, save, busy }: { close: () => void; save: (input: { email: string; name: string }) => void; busy: boolean }) {
   const [email, setEmail] = useState(""); const [name, setName] = useState("");
   return <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}><form className="modal compact-modal" onSubmit={(e) => { e.preventDefault(); save({ email, name }); }}><div className="modal-head"><div><span className="eyebrow">ADMINISTRATOR</span><h2>Add administrator</h2><p>If the account has not used Firebase Authentication yet, the invitation will activate at first Google sign-in.</p></div><button type="button" className="icon-button" onClick={close}><X size={20} /></button></div><div className="form-stack"><label>Email address<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="admin@example.com" /></label><label>Display name <small>Optional</small><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name" /></label></div><div className="modal-actions"><span /><span /><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" disabled={busy}>Add administrator</button></div></form></div>;
+}
+
+function AppSettingsModal({ app, close, save, busy }: { app: WebApp; close: () => void; save: (app: WebApp, requireEmailVerification: boolean) => void; busy: boolean }) {
+  const [requireVerification, setRequireVerification] = useState(app.requireEmailVerification === true);
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && close()}><div className="modal compact-modal"><div className="modal-head"><div><span className="eyebrow">APP SETTINGS</span><h2>{app.displayName}</h2><p>{app.firebaseAppId}</p></div><button type="button" className="icon-button" onClick={close}><X size={20} /></button></div><label className="status-control verification-control"><span><strong>Require email verification for new password signups</strong><small>When enabled, password-authenticated users must verify their email before requesting access to this app.</small></span><Toggle checked={requireVerification} onChange={setRequireVerification} /></label><div className="setting-note"><Shield size={18} /><span>Google users and existing approved users are unaffected. This setting is enforced by the server when a new access request is created.</span></div><div className="modal-actions"><span /><span /><button type="button" className="secondary-button" onClick={close}>Cancel</button><button type="button" className="primary-button" disabled={busy} onClick={() => save(app, requireVerification)}>{busy && <LoaderCircle className="spin" size={17} />}Save settings</button></div></div></div>;
 }
 
 function RequestModal({ request, close, review, busy }: { request: AccessRequest; close: () => void; review: (request: AccessRequest, decision: "approved" | "rejected", note?: string) => void; busy: boolean }) {
