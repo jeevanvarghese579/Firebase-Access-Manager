@@ -19,6 +19,7 @@ export interface AccessUser {
   role: string;
   active: boolean;
   apps: Record<string, boolean>;
+  appExpirations?: Record<string, string>;
   providerIds?: string[];
   pendingIdentity?: boolean;
   createdAt?: string;

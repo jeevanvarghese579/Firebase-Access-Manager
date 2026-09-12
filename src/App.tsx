@@ -2,8 +2,8 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import {
-  AppWindow, CircleAlert, CircleCheck, Cloud, Inbox, LayoutDashboard,
-  LoaderCircle, LogOut, Menu, Plus, RefreshCw, Search, Shield, Trash2, UserRound,
+  AppWindow, CalendarClock, CircleAlert, CircleCheck, Cloud, Inbox, LayoutDashboard,
+  LoaderCircle, LogOut, Mail, Menu, Plus, RefreshCw, Search, Shield, Trash2, UserRound,
   UsersRound, X,
 } from "lucide-react";
 import { auth, functions, googleProvider } from "./firebase";
@@ -169,6 +169,24 @@ function App() {
     } catch (err) { setError(getMessage(err)); } finally { setLoading(false); }
   }
 
+  async function updateAppAccess(app: WebApp, input: { user?: AccessUser; email: string; enabled: boolean; expiresOn: string }) {
+    setLoading(true);
+    setError("");
+    try {
+      await call("setUserAppAccess", {
+        id: input.user?.id,
+        pendingIdentity: input.user?.pendingIdentity === true,
+        email: input.email,
+        displayName: input.user?.displayName || "",
+        firebaseAppId: app.firebaseAppId,
+        enabled: input.enabled,
+        expiresOn: input.expiresOn || null,
+      });
+      await loadData();
+      setToast(input.user ? `Access updated for ${input.email}.` : `${input.email} added to ${app.displayName}.`);
+    } catch (err) { setError(getMessage(err)); } finally { setLoading(false); }
+  }
+
   if (!authReady) return <LoadingScreen />;
   if (!authUser || !authorized) return <Login onLogin={login} error={error} loading={loading} />;
 
@@ -215,7 +233,7 @@ function App() {
       {userEditor !== undefined && <UserModal initial={userEditor} apps={data.apps} close={() => setUserEditor(undefined)} save={saveUser} remove={deleteUser} busy={loading} />}
       {adminEditor && <AdminModal close={() => setAdminEditor(false)} save={saveAdmin} busy={loading} />}
       {requestEditor && <RequestModal request={requestEditor} close={() => setRequestEditor(null)} review={reviewRequest} busy={loading} />}
-      {appEditor && <AppSettingsModal app={appEditor} close={() => setAppEditor(null)} save={saveAppSettings} busy={loading} />}
+      {appEditor && <AppSettingsModal app={appEditor} users={data.users} close={() => setAppEditor(null)} save={saveAppSettings} updateAccess={updateAppAccess} busy={loading} />}
       {toast && <div className="toast"><CircleCheck size={18} />{toast}</div>}
     </div>
   );
@@ -312,9 +330,26 @@ function AdminModal({ close, save, busy }: { close: () => void; save: (input: { 
   return <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}><form className="modal compact-modal" onSubmit={(e) => { e.preventDefault(); save({ email, name }); }}><div className="modal-head"><div><span className="eyebrow">ADMINISTRATOR</span><h2>Add administrator</h2><p>If the account has not used Firebase Authentication yet, the invitation will activate at first Google sign-in.</p></div><button type="button" className="icon-button" onClick={close}><X size={20} /></button></div><div className="form-stack"><label>Email address<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="admin@example.com" /></label><label>Display name <small>Optional</small><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name" /></label></div><div className="modal-actions"><span /><span /><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" disabled={busy}>Add administrator</button></div></form></div>;
 }
 
-function AppSettingsModal({ app, close, save, busy }: { app: WebApp; close: () => void; save: (app: WebApp, requireEmailVerification: boolean) => void; busy: boolean }) {
+function AppSettingsModal({ app, users, close, save, updateAccess, busy }: { app: WebApp; users: AccessUser[]; close: () => void; save: (app: WebApp, requireEmailVerification: boolean) => void; updateAccess: (app: WebApp, input: { user?: AccessUser; email: string; enabled: boolean; expiresOn: string }) => void; busy: boolean }) {
   const [requireVerification, setRequireVerification] = useState(app.requireEmailVerification === true);
-  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && close()}><div className="modal compact-modal"><div className="modal-head"><div><span className="eyebrow">APP SETTINGS</span><h2>{app.displayName}</h2><p>{app.firebaseAppId}</p></div><button type="button" className="icon-button" onClick={close}><X size={20} /></button></div><label className="status-control verification-control"><span><strong>Require email verification for new password signups</strong><small>When enabled, password-authenticated users must verify their email before requesting access to this app.</small></span><Toggle checked={requireVerification} onChange={setRequireVerification} /></label><div className="setting-note"><Shield size={18} /><span>Google users and existing approved users are unaffected. This setting is enforced by the server when a new access request is created.</span></div><div className="modal-actions"><span /><span /><button type="button" className="secondary-button" onClick={close}>Cancel</button><button type="button" className="primary-button" disabled={busy} onClick={() => save(app, requireVerification)}>{busy && <LoaderCircle className="spin" size={17} />}Save settings</button></div></div></div>;
+  const [email, setEmail] = useState("");
+  const [expiresOn, setExpiresOn] = useState("");
+  const sortedUsers = [...users].sort((a, b) => Number(!!b.apps?.[app.firebaseAppId]) - Number(!!a.apps?.[app.firebaseAppId]) || a.email.localeCompare(b.email));
+  function addUser(event: FormEvent) {
+    event.preventDefault();
+    updateAccess(app, { email, enabled: true, expiresOn });
+    setEmail("");
+    setExpiresOn("");
+  }
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && close()}><div className="modal app-settings-modal"><div className="modal-head"><div><span className="eyebrow">APP SETTINGS</span><h2>{app.displayName}</h2><p>{app.firebaseAppId}</p></div><button type="button" className="icon-button" onClick={close}><X size={20} /></button></div><label className="status-control verification-control"><span><strong>Require email verification for new password signups</strong><small>When enabled, password-authenticated users must verify their email before requesting access to this app.</small></span><Toggle checked={requireVerification} onChange={setRequireVerification} /></label><div className="setting-note"><Shield size={18} /><span>Google users and existing approved users are unaffected. This setting is enforced by the server when a new access request is created.</span></div><section className="app-access-section"><div className="permission-head"><span><strong>People with application access</strong><small>{sortedUsers.filter((user) => user.active && user.apps?.[app.firebaseAppId]).length} currently enabled</small></span></div><form className="app-access-add" onSubmit={addUser}><label><Mail size={16} /><input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Add email address" /></label><label><CalendarClock size={16} /><input type="date" value={expiresOn} min={new Date().toISOString().slice(0, 10)} onChange={(event) => setExpiresOn(event.target.value)} aria-label="Optional expiry date" /></label><button className="primary-button" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />}Add access</button></form><p className="expiry-help">Expiry is optional. Dates end at 11:59 PM India time; access is denied immediately after the deadline and the hourly cleanup switches it off.</p><div className="app-access-list">{sortedUsers.map((user) => <AppAccessRow key={`${user.id}-${user.email}`} app={app} user={user} busy={busy} updateAccess={updateAccess} />)}{!sortedUsers.length && <Empty icon={UsersRound} title="No access records yet" text="Add an email address above to pre-approve access." />}</div></section><div className="modal-actions"><span /><span /><button type="button" className="secondary-button" onClick={close}>Close</button><button type="button" className="primary-button" disabled={busy} onClick={() => save(app, requireVerification)}>{busy && <LoaderCircle className="spin" size={17} />}Save settings</button></div></div></div>;
+}
+
+function AppAccessRow({ app, user, busy, updateAccess }: { app: WebApp; user: AccessUser; busy: boolean; updateAccess: (app: WebApp, input: { user?: AccessUser; email: string; enabled: boolean; expiresOn: string }) => void }) {
+  const currentExpiry = user.appExpirations?.[app.firebaseAppId]?.slice(0, 10) || "";
+  const [expiresOn, setExpiresOn] = useState(currentExpiry);
+  const enabled = user.apps?.[app.firebaseAppId] === true;
+  const expired = !!currentExpiry && new Date(user.appExpirations![app.firebaseAppId]).valueOf() <= Date.now();
+  return <div className="app-access-row"><span className="user-cell"><Avatar name={user.displayName || user.email} /><span><strong>{user.displayName || user.email}</strong><small>{user.email}{user.pendingIdentity ? " · awaiting signup" : !user.active ? " · account suspended" : ""}</small></span></span><label className="expiry-input"><span>{expired ? "Expired" : "Expires"}</span><input type="date" value={expiresOn} onChange={(event) => setExpiresOn(event.target.value)} /></label><button type="button" className="small-button" disabled={busy || expiresOn === currentExpiry} onClick={() => updateAccess(app, { user, email: user.email, enabled, expiresOn })}>Save date</button><Toggle checked={enabled} onChange={(checked) => updateAccess(app, { user, email: user.email, enabled: checked, expiresOn })} /></div>;
 }
 
 function RequestModal({ request, close, review, busy }: { request: AccessRequest; close: () => void; review: (request: AccessRequest, decision: "approved" | "rejected", note?: string) => void; busy: boolean }) {

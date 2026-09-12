@@ -16,6 +16,11 @@ service cloud.firestore {
         && request.auth.uid == uid
         && get(/databases/$(database)/documents/accessUsers/$(uid)).data.active == true
         && get(/databases/$(database)/documents/accessUsers/$(uid)).data.apps['1:379503088311:web:6a63dfcd8523e9f8133332'] == true
+        && (
+          !('appExpirations' in get(/databases/$(database)/documents/accessUsers/$(uid)).data)
+          || !('1:379503088311:web:6a63dfcd8523e9f8133332' in get(/databases/$(database)/documents/accessUsers/$(uid)).data.appExpirations)
+          || get(/databases/$(database)/documents/accessUsers/$(uid)).data.appExpirations['1:379503088311:web:6a63dfcd8523e9f8133332'] > request.time
+        )
         && get(/databases/$(database)/documents/appRegistry/1:379503088311:web:6a63dfcd8523e9f8133332).data.active == true;
     }
 
@@ -28,6 +33,11 @@ service cloud.firestore {
             exists(/databases/$(database)/documents/accessUsers/$(request.auth.uid))
             && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.active == true
             && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.apps[ascensionFirebaseAppId()] == true
+            && (
+              !('appExpirations' in get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data)
+              || !(ascensionFirebaseAppId() in get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.appExpirations)
+              || get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.appExpirations[ascensionFirebaseAppId()] > request.time
+            )
           )
           || (
             !exists(/databases/$(database)/documents/accessUsers/$(request.auth.uid))
@@ -76,6 +86,9 @@ service cloud.firestore {
       allow read, write: if false;
     }
     match /accessRequestKeys/{document=**} {
+      allow read, write: if false;
+    }
+    match /mail/{document=**} {
       allow read, write: if false;
     }
   }
