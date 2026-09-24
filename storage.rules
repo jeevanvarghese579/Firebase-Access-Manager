@@ -1,0 +1,48 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function signedInAs(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function hasCollageMakerAccess(uid) {
+      return signedInAs(uid)
+        && firestore.exists(/databases/(default)/documents/accessUsers/$(uid))
+        && firestore.get(/databases/(default)/documents/accessUsers/$(uid)).data.active == true
+        && 'apps' in firestore.get(/databases/(default)/documents/accessUsers/$(uid)).data
+        && '1:379503088311:web:6a63dfcd8523e9f8133332' in firestore.get(/databases/(default)/documents/accessUsers/$(uid)).data.apps
+        && firestore.get(/databases/(default)/documents/accessUsers/$(uid)).data.apps['1:379503088311:web:6a63dfcd8523e9f8133332'] == true
+        && (
+          !('appExpirations' in firestore.get(/databases/(default)/documents/accessUsers/$(uid)).data)
+          || !('1:379503088311:web:6a63dfcd8523e9f8133332' in firestore.get(/databases/(default)/documents/accessUsers/$(uid)).data.appExpirations)
+          || firestore.get(/databases/(default)/documents/accessUsers/$(uid)).data.appExpirations['1:379503088311:web:6a63dfcd8523e9f8133332'] > request.time
+        )
+        && firestore.exists(/databases/(default)/documents/appRegistry/1:379503088311:web:6a63dfcd8523e9f8133332)
+        && firestore.get(/databases/(default)/documents/appRegistry/1:379503088311:web:6a63dfcd8523e9f8133332).data.active == true;
+    }
+
+    match /apps/schoolBellManager/users/{uid}/{allPaths=**} {
+      allow read, write: if signedInAs(uid);
+    }
+
+    match /apps/collageMaker/users/{uid}/{allPaths=**} {
+      allow read, write: if hasCollageMakerAccess(uid);
+    }
+
+    // Temporary legacy compatibility. New Storage writes use /apps/{appKey}.
+    match /users/{uid}/{allPaths=**} {
+      allow read, write: if signedInAs(uid);
+    }
+
+    match /{topLevel}/{allPaths=**} {
+      allow read, write: if signedIn()
+        && topLevel != 'users'
+        && topLevel != 'apps';
+    }
+  }
+}
