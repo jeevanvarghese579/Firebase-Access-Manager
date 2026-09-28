@@ -11,6 +11,10 @@ service cloud.firestore {
       return '1:379503088311:web:7b5117cc3447eded133332';
     }
 
+    function labMetricsFirebaseAppId() {
+      return '1:379503088311:web:b37328f071189e18133332';
+    }
+
     function hasCollageMakerAccess(uid) {
       return request.auth != null
         && request.auth.uid == uid
@@ -47,9 +51,28 @@ service cloud.firestore {
         );
     }
 
+    function hasLabMetricsAccess(uid) {
+      return isAuthenticatedUser()
+        && request.auth.uid == uid
+        && exists(/databases/$(database)/documents/accessUsers/$(uid))
+        && get(/databases/$(database)/documents/accessUsers/$(uid)).data.active == true
+        && get(/databases/$(database)/documents/accessUsers/$(uid)).data.apps[labMetricsFirebaseAppId()] == true
+        && (
+          !('appExpirations' in get(/databases/$(database)/documents/accessUsers/$(uid)).data)
+          || !(labMetricsFirebaseAppId() in get(/databases/$(database)/documents/accessUsers/$(uid)).data.appExpirations)
+          || get(/databases/$(database)/documents/accessUsers/$(uid)).data.appExpirations[labMetricsFirebaseAppId()] > request.time
+        )
+        && exists(/databases/$(database)/documents/appRegistry/$(labMetricsFirebaseAppId()))
+        && get(/databases/$(database)/documents/appRegistry/$(labMetricsFirebaseAppId())).data.active == true;
+    }
+
     // Preserve the currently deployed Collage Maker rule exactly.
     match /users/{uid}/{document=**} {
       allow read, write: if hasCollageMakerAccess(uid);
+    }
+
+    match /apps/labMetrics/users/{uid}/{document=**} {
+      allow read, write: if hasLabMetricsAccess(uid);
     }
 
     match /invitedEmails/{email} {

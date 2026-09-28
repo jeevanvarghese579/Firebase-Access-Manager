@@ -40,6 +40,8 @@ The deployed project includes an invite for the Firebase project owner. At first
 
 ## Development and deployment
 
+This repository is the single source of truth for the shared Firebase project's Firestore rules. App repositories must not declare or deploy their own Firestore rules; add every app-specific namespace and its fixed App ID here so a deployment cannot remove another app's access.
+
 ```bash
 npm install
 npm --prefix functions install
