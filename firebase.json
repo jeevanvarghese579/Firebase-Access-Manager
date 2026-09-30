@@ -5,9 +5,6 @@
     "runtime": "nodejs22",
     "predeploy": ["npm --prefix functions run build"]
   },
-  "firestore": {
-    "rules": "firestore.rules"
-  },
   "hosting": {
     "site": "fir-access-manager-4af8c",
     "public": "dist",

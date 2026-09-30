@@ -6,6 +6,7 @@ import { setGlobalOptions } from "firebase-functions/v2/options";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { GoogleAuth } from "google-auth-library";
 import { createHash } from "node:crypto";
+import { getStorage } from "firebase-admin/storage";
 
 if (!getApps().length) initializeApp();
 setGlobalOptions({ region: "us-central1", maxInstances: 10, timeoutSeconds: 60 });
@@ -584,3 +585,193 @@ export const processAccessExpirations = onSchedule({ schedule: "every 1 hours", 
   }
   console.info("Access expiration scan complete", { documents: documents.length });
 });
+
+type MigrationStats = Record<string, { scanned: number; copied: number; existing: number }>;
+
+function migrationBucket(stats: MigrationStats, label: string) {
+  return stats[label] ||= { scanned: 0, copied: 0, existing: 0 };
+}
+
+async function migrateDocumentTree(
+  source: FirebaseFirestore.DocumentReference,
+  target: FirebaseFirestore.DocumentReference,
+  label: string,
+  copy: boolean,
+  stats: MigrationStats,
+) {
+  const sourceSnapshot = await source.get();
+  if (!sourceSnapshot.exists) return;
+  const bucket = migrationBucket(stats, label);
+  bucket.scanned += 1;
+  const targetSnapshot = await target.get();
+  if (targetSnapshot.exists) bucket.existing += 1;
+  else if (copy) {
+    await target.set(sourceSnapshot.data() || {});
+    bucket.copied += 1;
+  }
+  for (const childCollection of await source.listCollections()) {
+    const children = await childCollection.get();
+    for (const child of children.docs) {
+      await migrateDocumentTree(child.ref, target.collection(childCollection.id).doc(child.id), label, copy, stats);
+    }
+  }
+}
+
+async function migrateSingleDocument(
+  source: FirebaseFirestore.QueryDocumentSnapshot,
+  target: FirebaseFirestore.DocumentReference,
+  label: string,
+  copy: boolean,
+  stats: MigrationStats,
+) {
+  const bucket = migrationBucket(stats, label);
+  bucket.scanned += 1;
+  const targetSnapshot = await target.get();
+  if (targetSnapshot.exists) bucket.existing += 1;
+  else if (copy) {
+    await target.set(source.data());
+    bucket.copied += 1;
+  }
+}
+
+async function migrateRootCollection(
+  sourceCollection: string,
+  appKey: string,
+  copy: boolean,
+  stats: MigrationStats,
+) {
+  const source = await db.collection(sourceCollection).get();
+  for (const user of source.docs) {
+    await migrateDocumentTree(user.ref, db.doc(`apps/${appKey}/users/${user.id}`), `${sourceCollection}->${appKey}`, copy, stats);
+  }
+}
+
+function userDocumentTargets(collectionName: string, documentId: string, data: FirebaseFirestore.DocumentData, attendanceManagerUser: boolean) {
+  const target = (appKey: string) => `apps/${appKey}/users`;
+  const dedicated: Record<string, string> = {
+    projects: "schoolExamsManager",
+    profiles: "schoolBellManager",
+    sounds: "schoolBellManager",
+    workouts: "gymTracker",
+    absentees: "attendanceWaSender",
+    backups: "attendanceWaSender",
+    categories: "collageMaker",
+    items: "collageMaker",
+    participations: "collageMaker",
+    results: "collageMaker",
+    frameTemplates: "collageMaker",
+    exams: "schoolAcademicsManager",
+    examMarks: "schoolAcademicsManager",
+    plusOneMarks: "schoolAcademicsManager",
+    assignments: "schoolAcademicsManager",
+    assignmentStatuses: "schoolAcademicsManager",
+    graceMarks: "schoolAcademicsManager",
+    combinedAnalyses: "schoolAcademicsManager",
+  };
+  if (["attendance", "holidays", "holidayOverrides", "syncMetadata"].includes(collectionName)) {
+    return [target("attendanceManagerWithWaSender")];
+  }
+  if (dedicated[collectionName]) return [target(dedicated[collectionName])];
+  if (collectionName === "classes") {
+    if (attendanceManagerUser) return [target("attendanceManagerWithWaSender")];
+    return [target(("division" in data || "academicYear" in data) ? "schoolAcademicsManager" : "attendanceWaSender")];
+  }
+  if (collectionName === "students") {
+    if (attendanceManagerUser) return [target("attendanceManagerWithWaSender")];
+    if ("rollNo" in data) return [target("attendanceWaSender")];
+    if ("className" in data || "photoStorageUrl" in data || "gender" in data) return [target("collageMaker")];
+    if ("classId" in data && "rollNumber" in data) return [target("schoolAcademicsManager")];
+    return [];
+  }
+  if (collectionName === "settings") {
+    if (documentId === "bodyParts") return [target("gymTracker")];
+    if (documentId === "main") return [target("attendanceWaSender")];
+    if (documentId === "app") return attendanceManagerUser
+      ? [target("schoolBellManager"), target("schoolAcademicsManager"), target("attendanceManagerWithWaSender")]
+      : [target("schoolBellManager"), target("schoolAcademicsManager")];
+    return [target("collageMaker")];
+  }
+  return [];
+}
+
+async function migrateSharedUsers(copy: boolean, stats: MigrationStats) {
+  const unknown: Array<{ path: string; keys: string[] }> = [];
+  const users = await db.collection("users").get();
+  for (const user of users.docs) {
+    await migrateSingleDocument(user, db.doc(`apps/attendanceWaSender/users/${user.id}`), "users(root)->attendanceWaSender", copy, stats);
+    const sourceCollections = await user.ref.listCollections();
+    const attendanceManagerUser = sourceCollections.some((collection) => ["attendance", "holidays", "holidayOverrides"].includes(collection.id));
+    for (const sourceCollection of sourceCollections) {
+      const documents = await sourceCollection.get();
+      for (const sourceDocument of documents.docs) {
+        const targets = userDocumentTargets(sourceCollection.id, sourceDocument.id, sourceDocument.data(), attendanceManagerUser);
+        if (!targets.length) {
+          unknown.push({ path: sourceDocument.ref.path, keys: Object.keys(sourceDocument.data()).sort() });
+          continue;
+        }
+        for (const base of targets) {
+          const appKey = base.split("/")[1];
+          await migrateDocumentTree(
+            sourceDocument.ref,
+            db.doc(`${base}/${user.id}/${sourceCollection.id}/${sourceDocument.id}`),
+            `users/${sourceCollection.id}->${appKey}`,
+            copy,
+            stats,
+          );
+        }
+      }
+    }
+  }
+  return { userDocuments: users.size, unknown: unknown.slice(0, 100), unknownCount: unknown.length };
+}
+
+async function migrateStorage(copy: boolean, stats: MigrationStats) {
+  const bucket = getStorage().bucket();
+  const mappings = [
+    { source: "users/", marker: "/sounds/", appKey: "schoolBellManager", label: "storage:bell" },
+    { source: "users/", marker: "/photos/", appKey: "collageMaker", label: "storage:collage" },
+    { source: "users/", marker: "/frames/", appKey: "collageMaker", label: "storage:collage" },
+  ];
+  const [files] = await bucket.getFiles({ prefix: "users/" });
+  for (const file of files) {
+    const mapping = mappings.find((item) => file.name.startsWith(item.source) && file.name.includes(item.marker));
+    if (!mapping) continue;
+    const parts = file.name.split("/");
+    if (parts.length < 3) continue;
+    const destinationName = `apps/${mapping.appKey}/users/${parts[1]}/${parts.slice(2).join("/")}`;
+    const counter = migrationBucket(stats, mapping.label);
+    counter.scanned += 1;
+    const [exists] = await bucket.file(destinationName).exists();
+    if (exists) counter.existing += 1;
+    else if (copy) {
+      await file.copy(bucket.file(destinationName));
+      counter.copied += 1;
+    }
+  }
+}
+
+export const migrateLegacyDataToApps = onCall(
+  { timeoutSeconds: 540, memory: "1GiB" },
+  async (request) => {
+    const admin = await requireAdmin(request);
+    const input = (request.data || {}) as { mode?: string; confirmation?: string };
+    const copy = input.mode === "copy";
+    if (copy && input.confirmation !== "COPY_LEGACY_TO_APPS") {
+      throw new HttpsError("failed-precondition", "The copy confirmation token is missing.");
+    }
+    const stats: MigrationStats = {};
+    await migrateRootCollection("ascensionManagerUsers", "ascensionManager", copy, stats);
+    await migrateRootCollection("attendanceManagerUsers", "attendanceManagerWithWaSender", copy, stats);
+    await migrateRootCollection("schoolFestProUsers", "schoolFestPro", copy, stats);
+
+    const pdDocuments = await db.collection("userData").get();
+    for (const user of pdDocuments.docs) {
+      await migrateDocumentTree(user.ref, db.doc(`apps/pdGrCalculation/users/${user.id}/data/main`), "userData->pdGrCalculation", copy, stats);
+    }
+
+    const users = await migrateSharedUsers(copy, stats);
+    await migrateStorage(copy, stats);
+    console.info("Legacy namespace migration", { mode: copy ? "copy" : "audit", admin: admin.email, stats, users });
+    return { mode: copy ? "copy" : "audit", stats, users };
+  },
+);

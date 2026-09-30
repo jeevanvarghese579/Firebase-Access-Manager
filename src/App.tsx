@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
+import { getRedirectResult, onAuthStateChanged, signInWithRedirect, signOut, type User } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import {
   AppWindow, CalendarClock, CircleAlert, CircleCheck, Cloud, Inbox, LayoutDashboard,
@@ -50,6 +50,7 @@ function App() {
   const [adminEditor, setAdminEditor] = useState(false);
   const [requestEditor, setRequestEditor] = useState<AccessRequest | null>(null);
   const [appEditor, setAppEditor] = useState<WebApp | null>(null);
+  const [migrationAudit, setMigrationAudit] = useState<unknown>(null);
 
   const loadData = useCallback(async (refreshApps = false) => {
     setLoading(true);
@@ -86,6 +87,10 @@ function App() {
   }), [loadData]);
 
   useEffect(() => {
+    void getRedirectResult(auth).catch((err) => setError(getMessage(err)));
+  }, []);
+
+  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 3200);
     return () => window.clearTimeout(timer);
@@ -93,7 +98,7 @@ function App() {
 
   async function login() {
     setError("");
-    try { await signInWithPopup(auth, googleProvider); } catch (err) { setError(getMessage(err)); }
+    try { await signInWithRedirect(auth, googleProvider); } catch (err) { setError(getMessage(err)); }
   }
 
   async function refreshApps() {
@@ -101,6 +106,34 @@ function App() {
       await loadData(true);
       setToast("Firebase web apps refreshed.");
     } catch { /* handled in loadData */ }
+  }
+
+  async function runMigrationAudit() {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await call("migrateLegacyDataToApps", { mode: "audit" });
+      setMigrationAudit(result);
+      setToast("Legacy data audit completed");
+    } catch (err) {
+      setError(getMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runMigrationCopy() {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await call("migrateLegacyDataToApps", { mode: "copy", confirmation: "COPY_LEGACY_TO_APPS" });
+      setMigrationAudit(result);
+      setToast("Legacy data copy completed");
+    } catch (err) {
+      setError(getMessage(err));
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function saveUser(value: AccessUser) {
@@ -223,7 +256,7 @@ function App() {
         </header>
         <section className="content">
           {error && <div className="alert"><CircleAlert size={18} /><span>{error}</span><button onClick={() => setError("")}><X size={17} /></button></div>}
-          {view === "dashboard" && <Dashboard data={data} setView={setView} />}
+          {view === "dashboard" && <Dashboard data={data} setView={setView} migrationAudit={migrationAudit} runMigrationAudit={runMigrationAudit} runMigrationCopy={runMigrationCopy} auditing={loading} />}
           {view === "users" && <Users data={data} edit={setUserEditor} add={() => setUserEditor(null)} />}
           {view === "apps" && <Apps apps={data.apps} users={data.users} refresh={refreshApps} syncing={syncing} open={setAppEditor} />}
           {view === "requests" && <Requests requests={data.requests} open={setRequestEditor} review={reviewRequest} busy={loading} />}
@@ -257,7 +290,7 @@ function PageHead({ eyebrow, title, description, action }: { eyebrow: string; ti
   return <div className="page-head"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{description}</p></div>{action}</div>;
 }
 
-function Dashboard({ data, setView }: { data: AdminData; setView: (v: View) => void }) {
+function Dashboard({ data, setView, migrationAudit, runMigrationAudit, runMigrationCopy, auditing }: { data: AdminData; setView: (v: View) => void; migrationAudit: unknown; runMigrationAudit: () => void; runMigrationCopy: () => void; auditing: boolean }) {
   const activeUsers = data.users.filter((u) => u.active).length;
   const pendingRequests = data.requests.filter((request) => request.status === "pending");
   const cards = [
@@ -269,6 +302,10 @@ function Dashboard({ data, setView }: { data: AdminData; setView: (v: View) => v
   ];
   return <>
     <PageHead eyebrow="OVERVIEW" title="Access at a glance" description="Monitor authorized accounts and application coverage across your Firebase project." />
+    <div className="panel" style={{ marginBottom: 18 }}>
+      <div className="panel-title"><div><h2>Legacy data migration</h2><p>Audit is read-only. Copy creates missing isolated records and never deletes or overwrites.</p></div><div className="row-actions"><button data-testid="run-migration-audit" className="secondary-button" onClick={runMigrationAudit} disabled={auditing}>{auditing ? "Working…" : "Run audit"}</button><button data-testid="run-migration-copy" className="primary-button" onClick={runMigrationCopy} disabled={auditing}>Copy missing data</button></div></div>
+      {migrationAudit ? <pre data-testid="migration-audit-result" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12, maxHeight: 360, overflow: "auto" }}>{JSON.stringify(migrationAudit, null, 2)}</pre> : <p className="muted">Run this before any production copy to verify School Bell and every legacy namespace.</p>}
+    </div>
     <div className="stats-grid">{cards.map(({ label, value, detail, icon: Icon, view }) => <button className="stat-card" key={label} onClick={() => setView(view)}><span className="stat-icon"><Icon size={19} /></span><span className="stat-label">{label}</span><strong>{value}</strong><small>{detail}</small></button>)}</div>
     <div className="dashboard-grid">
       <div className="panel"><div className="panel-title"><div><h2>Recent users</h2><p>Latest permission updates</p></div><button className="text-button" onClick={() => setView("users")}>View all</button></div>{data.users.length ? <div className="compact-list">{data.users.slice(0, 5).map((user) => <div key={user.email}><Avatar name={user.displayName || user.email} /><span><strong>{user.displayName || user.email.split("@")[0]}</strong><small>{user.email}</small></span><Status active={user.active} /></div>)}</div> : <Empty icon={UsersRound} title="No users yet" text="Add the first approved account from Users." />}</div>
@@ -334,7 +371,7 @@ function AppSettingsModal({ app, users, close, save, updateAccess, busy }: { app
   const [requireVerification, setRequireVerification] = useState(app.requireEmailVerification === true);
   const [email, setEmail] = useState("");
   const [expiresOn, setExpiresOn] = useState("");
-  const sortedUsers = [...users].sort((a, b) => Number(!!b.apps?.[app.firebaseAppId]) - Number(!!a.apps?.[app.firebaseAppId]) || a.email.localeCompare(b.email));
+  const sortedUsers = [...users].sort((a, b) => Number(!!b.apps?.[app.firebaseAppId]) - Number(!!a.apps?.[app.firebaseAppId]) || String(a.email ?? '').localeCompare(String(b.email ?? '')));
   function addUser(event: FormEvent) {
     event.preventDefault();
     updateAccess(app, { email, enabled: true, expiresOn });
