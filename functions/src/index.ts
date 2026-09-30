@@ -592,6 +592,54 @@ function migrationBucket(stats: MigrationStats, label: string) {
   return stats[label] ||= { scanned: 0, copied: 0, existing: 0 };
 }
 
+async function countDocumentTree(reference: FirebaseFirestore.DocumentReference): Promise<number> {
+  const snapshot = await reference.get();
+  if (!snapshot.exists) return 0;
+  let total = 1;
+  for (const childCollection of await reference.listCollections()) {
+    const children = await childCollection.get();
+    for (const child of children.docs) total += await countDocumentTree(child.ref);
+  }
+  return total;
+}
+
+async function buildLegacyDeletionInventory() {
+  const candidateRoots = [
+    "ascensionManagerUsers",
+    "attendanceManagerUsers",
+    "schoolFestProUsers",
+    "userData",
+    "plannerData",
+    "content",
+    "gallery",
+    "teachers",
+    "inaugurationSessions",
+  ];
+  const rootCollections: Record<string, number> = {};
+  for (const collectionName of candidateRoots) {
+    const documents = await db.collection(collectionName).get();
+    let total = 0;
+    for (const document of documents.docs) total += await countDocumentTree(document.ref);
+    rootCollections[collectionName] = total;
+  }
+
+  const userRootDocuments = await db.collection("users").get();
+  const userSubcollections: Record<string, number> = {};
+  for (const user of userRootDocuments.docs) {
+    for (const childCollection of await user.ref.listCollections()) {
+      const children = await childCollection.get();
+      let total = userSubcollections[childCollection.id] || 0;
+      for (const child of children.docs) total += await countDocumentTree(child.ref);
+      userSubcollections[childCollection.id] = total;
+    }
+  }
+
+  return {
+    rootCollections,
+    users: { rootDocuments: userRootDocuments.size, subcollections: userSubcollections },
+  };
+}
+
 async function migrateDocumentTree(
   source: FirebaseFirestore.DocumentReference,
   target: FirebaseFirestore.DocumentReference,
@@ -771,7 +819,8 @@ export const migrateLegacyDataToApps = onCall(
 
     const users = await migrateSharedUsers(copy, stats);
     await migrateStorage(copy, stats);
-    console.info("Legacy namespace migration", { mode: copy ? "copy" : "audit", admin: admin.email, stats, users });
-    return { mode: copy ? "copy" : "audit", stats, users };
+    const deletionInventory = await buildLegacyDeletionInventory();
+    console.info("Legacy namespace migration", { mode: copy ? "copy" : "audit", admin: admin.email, stats, users, deletionInventory });
+    return { mode: copy ? "copy" : "audit", stats, users, deletionInventory };
   },
 );
