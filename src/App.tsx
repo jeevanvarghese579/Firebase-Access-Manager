@@ -134,6 +134,8 @@ function App() {
     } finally {
       setLoading(false);
     }
+  }
+
   async function refreshRequests() {
     await loadData();
     setToast("Pending requests refreshed.");
