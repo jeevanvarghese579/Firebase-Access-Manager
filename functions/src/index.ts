@@ -441,7 +441,10 @@ export const requestAppAccess = onCall(async (request) => {
         const existing = await transaction.get(db.collection("accessRequests").doc(existingId));
         if (existing.exists && existing.data()?.status === "pending") return { status: "pending", requestId: existingId };
         if (existing.exists && existing.data()?.status === "rejected") return { status: "rejected", requestId: existingId };
-        if (existing.exists && existing.data()?.status === "approved") return { status: "approved", requestId: existingId };
+        // A past approval must not permanently block a new request when that
+        // app permission was later disabled, expired, or the account became inactive.
+        // In that state, fall through and create a fresh pending request while
+        // retaining the reviewed request as history.
       }
     }
 
