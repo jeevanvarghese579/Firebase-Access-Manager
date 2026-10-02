@@ -134,6 +134,9 @@ function App() {
     } finally {
       setLoading(false);
     }
+  async function refreshRequests() {
+    await loadData();
+    setToast("Pending requests refreshed.");
   }
 
   async function saveUser(value: AccessUser) {
@@ -259,7 +262,7 @@ function App() {
           {view === "dashboard" && <Dashboard data={data} setView={setView} migrationAudit={migrationAudit} runMigrationAudit={runMigrationAudit} runMigrationCopy={runMigrationCopy} auditing={loading} />}
           {view === "users" && <Users data={data} edit={setUserEditor} add={() => setUserEditor(null)} />}
           {view === "apps" && <Apps apps={data.apps} users={data.users} refresh={refreshApps} syncing={syncing} open={setAppEditor} />}
-          {view === "requests" && <Requests requests={data.requests} open={setRequestEditor} review={reviewRequest} busy={loading} />}
+          {view === "requests" && <Requests requests={data.requests} open={setRequestEditor} review={reviewRequest} refresh={refreshRequests} busy={loading} />}
           {view === "admins" && <Admins admins={data.admins} add={() => setAdminEditor(true)} toggle={toggleAdmin} />}
         </section>
       </main>
@@ -332,13 +335,13 @@ function Apps({ apps, users, refresh, syncing, open }: { apps: WebApp[]; users: 
   </>;
 }
 
-function Requests({ requests, open, review, busy }: { requests: AccessRequest[]; open: (request: AccessRequest) => void; review: (request: AccessRequest, decision: "approved" | "rejected") => void; busy: boolean }) {
+function Requests({ requests, open, review, refresh, busy }: { requests: AccessRequest[]; open: (request: AccessRequest) => void; review: (request: AccessRequest, decision: "approved" | "rejected") => void; refresh: () => void; busy: boolean }) {
   const [filter, setFilter] = useState<RequestStatus | "all">("pending");
   const [search, setSearch] = useState("");
   const filtered = requests.filter((request) => (filter === "all" || request.status === filter) && `${request.email} ${request.displayName} ${request.appDisplayName}`.toLowerCase().includes(search.toLowerCase()));
   const tabs: Array<{ id: RequestStatus | "all"; label: string }> = [{ id: "pending", label: "Pending" }, { id: "approved", label: "Approved" }, { id: "rejected", label: "Rejected" }, { id: "all", label: "All" }];
   return <>
-    <PageHead eyebrow="ACCESS REQUESTS" title="Requests" description="Review account requests without changing permissions for any other application." />
+    <PageHead eyebrow="ACCESS REQUESTS" title="Requests" description="Review account requests without changing permissions for any other application." action={<button className="secondary-button" onClick={refresh} disabled={busy}><RefreshCw className={busy ? "spin" : ""} size={17} />{busy ? "Refreshing…" : "Refresh requests"}</button>} />
     <div className="request-tools"><div className="filter-tabs">{tabs.map((tab) => <button key={tab.id} className={filter === tab.id ? "active" : ""} onClick={() => setFilter(tab.id)}>{tab.label}{tab.id !== "all" && <span>{requests.filter((request) => request.status === tab.id).length}</span>}</button>)}</div><label className="search"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search email or application" /></label></div>
     <div className="table-card request-card"><div className="table-row request-table table-header"><span>User</span><span>Provider</span><span>Application</span><span>Request type</span><span>Requested</span><span>Status</span><span>Actions</span></div>{filtered.map((request) => <div className="table-row request-table request-row" key={request.id} role="button" tabIndex={0} onClick={() => open(request)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") open(request); }}><span className="user-cell"><Avatar name={request.displayName || request.email} /><span><strong>{request.displayName || "Firebase user"}</strong><small>{request.email}</small></span></span><span className="provider-label">{providerLabel(request.providerIds)}</span><span className="request-app"><strong>{request.appDisplayName}</strong><small>{request.firebaseAppId}</small></span><span className="request-type">{request.requestType === "new-account" ? "New account" : "Access request"}</span><span className="muted">{formatDateTime(request.requestedAt)}</span><RequestStatusPill status={request.status} /><span className="row-actions">{request.status === "pending" ? <><button disabled={busy} className="approve-button" onClick={(event) => { event.stopPropagation(); review(request, "approved"); }}>Approve</button><button disabled={busy} className="reject-button" onClick={(event) => { event.stopPropagation(); review(request, "rejected"); }}>Reject</button></> : <button className="small-button" onClick={(event) => { event.stopPropagation(); open(request); }}>Details</button>}</span></div>)}{!filtered.length && <Empty icon={Inbox} title={search ? "No requests found" : `No ${filter === "all" ? "access" : filter} requests`} text={search ? "Try a different email or application name." : filter === "pending" ? "New user requests will appear here." : "Reviewed requests are retained for history."} />}</div>
   </>;
